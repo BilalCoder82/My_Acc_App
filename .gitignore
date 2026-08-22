@@ -1,0 +1,20 @@
+# بيانات العملاء — ممنوع رفعها للـrepo العام تحت أي ظرف
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# نسخ احتياطية
+backups/
+*.zip.enc
+
+# بيئة بايثون
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ملفات نظام
+.DS_Store
