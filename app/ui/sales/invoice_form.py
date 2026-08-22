@@ -64,7 +64,8 @@ class SalesInvoiceFormView(QWidget):
         if self.invoice:
             self._load_invoice()
         else:
-            self._add_empty_row()
+            for _ in range(8):  # يبدأ بعدة أسطر فاضية — إحساس دفتر حقيقي، لا سطر يتيم بمساحة بيضاء
+                self._add_empty_row()
 
     # -- بناء الواجهة (مقسّمة كدوال واضحة — مرشّحة لتصبح ملفات منفصلة لاحقاً) --
     def _build_ui(self) -> None:
@@ -77,7 +78,7 @@ class SalesInvoiceFormView(QWidget):
 
     def _build_document_header(self) -> QWidget:
         card = QFrame()
-        card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 8px; }")
+        card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 8px; border: 1px solid #E5E7EB; }")
         row = QHBoxLayout(card)
 
         title = QLabel("فاتورة بيع")
@@ -94,13 +95,13 @@ class SalesInvoiceFormView(QWidget):
 
         row.addWidget(title)
         row.addWidget(self.invoice_no_label)
-        row.addStretch()
         row.addWidget(self.status_badge)
+        row.addStretch()
         return card
 
     def _build_document_info(self) -> QWidget:
         card = QFrame()
-        card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 10px; }")
+        card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 10px; border: 1px solid #E5E7EB; }")
         grid = QGridLayout(card)
         grid.setHorizontalSpacing(16)
 
@@ -200,7 +201,7 @@ class SalesInvoiceFormView(QWidget):
 
         # كتلة الإجماليات — بطاقة يمينية مميّزة
         totals_card = QFrame()
-        totals_card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 12px; }")
+        totals_card.setStyleSheet("QFrame { background: white; border-radius: 6px; padding: 12px; border: 1px solid #E5E7EB; }")
         totals_card.setFixedWidth(280)
         t_layout = QVBoxLayout(totals_card)
 
@@ -252,7 +253,9 @@ class SalesInvoiceFormView(QWidget):
         self.grid.setRowCount(0)
         for line in inv.lines:
             self._add_row_from_line(line)
-        self._add_empty_row()
+        # نضيف أسطر فاضية إضافية حتى نوصل 8 على الأقل — نفس منطق الفاتورة الجديدة
+        while self.grid.rowCount() < 8:
+            self._add_empty_row()
         self.grid.blockSignals(False)
 
         self._recalculate_totals()
