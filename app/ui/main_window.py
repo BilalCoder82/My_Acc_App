@@ -1,12 +1,5 @@
 """
-Main Window — نطاق v1 المعتمد (راجع UI_DESIGN.md)
-======================================================
-Navigation بسيطة (بدون Section Map منفصل) + Workspace Tabs.
-عربي RTL ثابت — بدون نظام ترجمة. النصوص مفصولة كثوابت بأعلى الملف
-لتسهيل استخراجها لاحقاً لو احتجنا ترجمة فعلية (بدون بناء النظام الآن).
-
-قاعدة صارمة: هذا الملف لا يحتوي أي منطق محاسبي ولا استعلام SQLAlchemy
-مباشر — فقط بناء واجهة واستدعاء app/services/ و app/db.py.
+Main Window — نطاق v1 المعتمد (مُحسَّن v2)
 """
 
 from __future__ import annotations
@@ -14,11 +7,10 @@ from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QMenuBar, QStatusBar, QWidget, QVBoxLayout, QLabel
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont
 from sqlalchemy.orm import Session
 
 
-# نصوص الواجهة — منفصلة هنا عمداً (سهولة استخراج لاحق للترجمة، بدون نظام ترجمة فعلي الآن)
 LABELS = {
     "app_title": "نظام محاسبة سطح مكتب",
     "home": "الرئيسية",
@@ -47,19 +39,26 @@ LABELS = {
 class MainWindow(QMainWindow):
     def __init__(self, session: Session, parent=None):
         super().__init__(parent)
-        self.session = session  # جلسة قاعدة بيانات العميل الحالي المفتوح
+        self.session = session
 
         self.setWindowTitle(LABELS["app_title"])
         self.setLayoutDirection(Qt.RightToLeft)
-        self.resize(1280, 800)
+        self.resize(1400, 900)
+        self.setStyleSheet("background-color: #F5F7FA;")
 
         self._build_menu()
         self._build_workspace()
         self._build_status_bar()
 
-    # -- بناء القائمة العلوية (Navigation) ----------------------------------
     def _build_menu(self) -> None:
         menu_bar: QMenuBar = self.menuBar()
+        menu_bar.setStyleSheet(
+            "QMenuBar { background: #1E3A5F; color: white; padding: 4px; font-size: 12px; }"
+            "QMenuBar::item:selected { background: #2563EB; }"
+            "QMenu { background: white; border: 1px solid #E5E7EB; }"
+            "QMenu::item { padding: 6px 16px; }"
+            "QMenu::item:selected { background: #DBEAFE; color: #1E40AF; }"
+        )
 
         home_action = QAction(LABELS["home"], self)
         home_action.triggered.connect(self._open_dashboard)
@@ -98,16 +97,23 @@ class MainWindow(QMainWindow):
         action.triggered.connect(handler)
         menu.addAction(action)
 
-    # -- Workspace Tabs -------------------------------------------------------
     def _build_workspace(self) -> None:
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
+        self.tabs.setStyleSheet(
+            "QTabWidget::pane { border: none; background: #F5F7FA; }"
+            "QTabBar::tab { background: #E5E7EB; padding: 8px 16px; "
+            "border-top-left-radius: 6px; border-top-right-radius: 6px; "
+            "font-size: 12px; color: #4B5563; }"
+            "QTabBar::tab:selected { background: white; color: #1E40AF; "
+            "font-weight: bold; border-top: 2px solid #2563EB; }"
+            "QTabBar::tab:!selected { margin-top: 2px; }"
+        )
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self.tabs)
 
     def _open_tab(self, title: str, widget: QWidget) -> None:
-        """يفتح تاب جديد، أو يبدّل لتاب موجود بنفس العنوان بدل التكرار."""
         for i in range(self.tabs.count()):
             if self.tabs.tabText(i) == title:
                 self.tabs.setCurrentIndex(i)
@@ -120,13 +126,26 @@ class MainWindow(QMainWindow):
 
     def _build_status_bar(self) -> None:
         bar: QStatusBar = self.statusBar()
+        bar.setStyleSheet(
+            "QStatusBar { background: #1E3A5F; color: white; padding: 4px 12px; "
+            "font-size: 11px; }"
+        )
         bar.showMessage(LABELS["ready"])
 
-    # -- معالجات فتح الشاشات ----------------------------------------------
     def _open_dashboard(self) -> None:
         placeholder = QWidget()
+        placeholder.setStyleSheet("background: #F5F7FA;")
         layout = QVBoxLayout(placeholder)
-        layout.addWidget(QLabel(f"مرحباً — {LABELS['app_title']}"))
+        title = QLabel(f"مرحباً — {LABELS['app_title']}")
+        title_font = QFont()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #1E3A5F;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addStretch()
+        layout.addWidget(title)
+        layout.addStretch()
         self._open_tab(LABELS["home"], placeholder)
 
     def _open_chart_of_accounts(self) -> None:
@@ -145,6 +164,12 @@ class MainWindow(QMainWindow):
 
     def _open_not_implemented(self) -> None:
         placeholder = QWidget()
+        placeholder.setStyleSheet("background: #F5F7FA;")
         layout = QVBoxLayout(placeholder)
-        layout.addWidget(QLabel("هذه الشاشة لم تُبنَ بعد — قيد التطوير"))
+        lbl = QLabel("هذه الشاشة لم تُبنَ بعد — قيد التطوير")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("color: #9CA3AF; font-size: 14px;")
+        layout.addStretch()
+        layout.addWidget(lbl)
+        layout.addStretch()
         self._open_tab("قريباً", placeholder)
