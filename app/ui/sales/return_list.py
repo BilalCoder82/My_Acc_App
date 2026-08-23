@@ -1,5 +1,5 @@
 """
-Sales Return List — قائمة مرتجعات البيع
+Sales Return Invoice List — قائمة مرتجعات البيع
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.models import InvoiceKind
 from app.services.invoice_queries import list_invoices
 
-COLUMNS = ["رقم المرتجع", "التاريخ", "العميل", "الحالة"]
+COLUMNS = ["رقم المرتجع", "الفاتورة الأصلية", "التاريخ", "العميل", "الحالة"]
 
 STATUS_STYLE = {
     "draft": ("مسودة", "#F59E0B", "#FFFBEB"),
@@ -23,7 +23,7 @@ STATUS_STYLE = {
 }
 
 
-class SalesReturnListView(QWidget):
+class SalesReturnInvoiceListView(QWidget):
     invoice_opened = Signal(object, str)
 
     def __init__(self, session: Session, parent=None):
@@ -72,11 +72,13 @@ class SalesReturnListView(QWidget):
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 160)
-        self.table.setColumnWidth(1, 120)
-        self.table.setColumnWidth(3, 100)
+        self.table.setColumnWidth(1, 160)
+        self.table.setColumnWidth(2, 120)
+        self.table.setColumnWidth(4, 100)
         self.table.horizontalHeader().setFixedHeight(38)
         self.table.horizontalHeader().setStyleSheet(
             "QHeaderView::section { background: #EEF2FF; padding: 8px; "
@@ -104,19 +106,29 @@ class SalesReturnListView(QWidget):
         for row, inv in enumerate(invoices):
             self._row_invoice_ids.append(inv.id)
             self.table.setItem(row, 0, QTableWidgetItem(inv.invoice_no))
-            self.table.setItem(row, 1, QTableWidgetItem(str(inv.invoice_date)))
-            self.table.setItem(row, 2, QTableWidgetItem(inv.party_name))
+            original_no = ""
+            if inv.original_invoice_id:
+                from app.models import Invoice
+                orig = self.session.get(Invoice, inv.original_invoice_id)
+                if orig:
+                    original_no = orig.invoice_no
+            self.table.setItem(row, 1, QTableWidgetItem(original_no))
+            self.table.setItem(row, 2, QTableWidgetItem(str(inv.invoice_date)))
+            self.table.setItem(row, 3, QTableWidgetItem(inv.party_name))
 
             status_key = inv.status.value
             label, color, bg = STATUS_STYLE.get(status_key, (status_key, "#6B7280", "#F3F4F6"))
             status_item = QTableWidgetItem(label)
             status_item.setTextAlignment(Qt.AlignCenter)
+            status_item.setForeground(Qt.white)
+            status_item.setBackground(Qt.white)
             status_item.setText(
                 f'<span style="background-color:{bg}; color:{color}; '
                 f'padding:3px 10px; border-radius:10px; font-weight:bold; '
                 f'font-size:11px;">{label}</span>'
             )
-            self.table.setItem(row, 3, status_item)
+            self.table.setItem(row, 4, status_item)
+
         self.table.resizeRowsToContents()
 
     def _open_selected(self) -> None:

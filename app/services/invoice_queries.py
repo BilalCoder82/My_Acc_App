@@ -6,6 +6,7 @@ Invoice Queries — استعلامات قراءة فقط للواجهة
 """
 
 from __future__ import annotations
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Invoice, InvoiceKind
@@ -20,6 +21,13 @@ def list_invoices(session: Session, kind: InvoiceKind | None = None, search: str
             (Invoice.invoice_no.ilike(f"%{search}%")) | (Invoice.party_name.ilike(f"%{search}%"))
         )
     return query.order_by(Invoice.invoice_date.desc(), Invoice.id.desc()).all()
+
+
+def get_invoice_by_no(session: Session, invoice_no: str) -> Invoice | None:
+    """يجلب فاتورة برقمها الفريد (invoice_no)."""
+    return session.execute(
+        select(Invoice).where(Invoice.invoice_no == invoice_no)
+    ).scalar_one_or_none()
 
 
 def list_items(session: Session, search: str = ""):

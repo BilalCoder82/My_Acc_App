@@ -1,5 +1,5 @@
 """
-Sales Return Form — مرتجع بيع (نسخة من invoice_form بنفس التنسيق)
+Sales Return Invoice Form — مرتجع فاتورة البيع
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from app.models import Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, Item
 from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_edit import add_line as service_add_line, EditNotAllowedError
 from app.services.posting import post_return, PostingError
-from app.services.invoice_queries import list_items
+from app.services.invoice_queries import list_items, get_invoice_by_no
 
 GRID_COLUMNS = ["كود", "المادة", "الكمية", "السعر", "الحسم %", "الضريبة %", "الإجمالي"]
 COL_CODE, COL_ITEM, COL_QTY, COL_PRICE, COL_DISC, COL_TAX, COL_TOTAL = range(7)
@@ -35,7 +35,7 @@ STATUS_STYLE = {
 
 FIELD_WIDTHS = {
     "invoice_no": 160, "date": 140, "currency": 120,
-    "exchange_rate": 120, "warehouse": 180,
+    "exchange_rate": 120, "original_invoice": 200,
 }
 
 CARD_STYLE = (
@@ -48,15 +48,7 @@ CARD_STYLE = (
 )
 
 
-def _right_item(text: str = "", editable: bool = True) -> QTableWidgetItem:
-    item = QTableWidgetItem(text)
-    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    if not editable:
-        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-    return item
-
-
-class SalesReturnFormView(QWidget):
+class SalesReturnInvoiceFormView(QWidget):
     def __init__(self, session: Session, invoice_id: int | None = None, parent=None):
         super().__init__(parent)
         self.session = session
@@ -65,7 +57,6 @@ class SalesReturnFormView(QWidget):
 
         self.setStyleSheet(f"background-color: {COLOR_BG};")
         self._build_ui()
-        self._setup_tab_order()
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_draft)
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self._post)
         if self.invoice:
@@ -73,7 +64,6 @@ class SalesReturnFormView(QWidget):
         else:
             for _ in range(8):
                 self._add_empty_row()
-            self.date_edit.setFocus()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -90,7 +80,7 @@ class SalesReturnFormView(QWidget):
         row = QHBoxLayout(card)
         row.setSpacing(8)
 
-        title = QLabel("مرتجع بيع")
+        title = QLabel("مرتجع فاتورة بيع")
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
@@ -141,10 +131,15 @@ class SalesReturnFormView(QWidget):
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
-        self.date_edit.setFixedWidth(FIELD_WIDTHS["date"])
+
+        self.original_invoice_edit = QLineEdit()
+        self.original_invoice_edit.setPlaceholderText("رقم فاتورة البيع الأصلية...")
+        self.original_invoice_edit.setMinimumWidth(200)
+        self.original_invoice_edit.textChanged.connect(self._on_original_invoice_changed)
 
         self.party_edit = QLineEdit()
-        self.party_edit.setPlaceholderText("ابحث عن العميل أو اكتب اسمه...")
+        self.party_edit.setPlaceholderText("اسم العميل (يُملأ تلقائياً من الفاتورة الأصلية)")
+        self.party_edit.setReadOnly(True)
         self.party_edit.setMinimumWidth(200)
 
         self.currency_combo = QComboBox()
@@ -156,52 +151,61 @@ class SalesReturnFormView(QWidget):
         self.exchange_rate_spin.setValue(1)
         self.exchange_rate_spin.setButtonSymbols(QDoubleSpinBox.NoButtons)
 
-        party_row = QHBoxLayout()
-        party_row.setSpacing(4)
-        party_row.setContentsMargins(0, 0, 0, 0)
-        party_row.addWidget(self.party_edit, stretch=1)
-        search_btn = QPushButton("🔍")
-        search_btn.setFixedWidth(32)
-        search_btn.setEnabled(False)
-        search_btn.setStyleSheet("padding: 2px; font-size: 12px;")
-        party_row.addWidget(search_btn)
-
-        party_widget = QWidget()
-        party_widget.setLayout(party_row)
-        party_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        party_widget.setMinimumWidth(280)
-
         grid.addWidget(labeled("رقم المرتجع", self.invoice_no_edit, FIELD_WIDTHS["invoice_no"]), 0, 0)
         grid.addWidget(labeled("التاريخ", self.date_edit, FIELD_WIDTHS["date"]), 0, 1)
-        grid.addWidget(labeled("العميل", party_widget), 0, 2, 1, 2)
+        grid.addWidget(labeled("الفاتورة الأصلية", self.original_invoice_edit, FIELD_WIDTHS["original_invoice"]), 0, 2)
+        grid.addWidget(labeled("العميل", self.party_edit), 0, 3)
 
         grid.addWidget(labeled("العملة", self.currency_combo, FIELD_WIDTHS["currency"]), 1, 0)
         grid.addWidget(labeled("سعر الصرف", self.exchange_rate_spin, FIELD_WIDTHS["exchange_rate"]), 1, 1)
         grid.setColumnStretch(5, 1)
         return card
 
-    def _setup_tab_order(self) -> None:
-        QWidget.setTabOrder(self.date_edit, self.party_edit)
-        QWidget.setTabOrder(self.party_edit, self.currency_combo)
-        QWidget.setTabOrder(self.currency_combo, self.exchange_rate_spin)
-        QWidget.setTabOrder(self.exchange_rate_spin, self.grid)
+    def _on_original_invoice_changed(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            self.party_edit.clear()
+            return
+        original = get_invoice_by_no(self.session, text)
+        if original and original.kind == InvoiceKind.SALES and original.status == InvoiceStatus.POSTED:
+            self.party_edit.setText(original.party_name)
+            self.currency_combo.setCurrentText(original.currency_code)
+            self.exchange_rate_spin.setValue(float(original.exchange_rate))
+            self._load_original_lines(original)
+        else:
+            self.party_edit.clear()
+
+    def _load_original_lines(self, original: Invoice) -> None:
+        self.grid.blockSignals(True)
+        self._close_current_editor()
+        self.grid.setRowCount(0)
+        for line in original.lines:
+            self._add_row_from_line(line, is_return=True)
+        for _ in range(max(1, 8 - len(original.lines))):
+            self._add_empty_row()
+        self.grid.blockSignals(False)
+        self._recalculate_totals()
 
     def _build_lines_grid(self) -> QWidget:
         self.grid = QTableWidget(0, len(GRID_COLUMNS))
         self.grid.setHorizontalHeaderLabels(GRID_COLUMNS)
+
         self.grid.horizontalHeader().setSectionResizeMode(COL_ITEM, QHeaderView.Stretch)
         for col in [COL_CODE, COL_QTY, COL_PRICE, COL_DISC, COL_TAX, COL_TOTAL]:
             self.grid.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
+
         self.grid.setColumnWidth(COL_CODE, 80)
         self.grid.setColumnWidth(COL_QTY, 80)
         self.grid.setColumnWidth(COL_PRICE, 100)
         self.grid.setColumnWidth(COL_DISC, 80)
         self.grid.setColumnWidth(COL_TAX, 80)
         self.grid.setColumnWidth(COL_TOTAL, 120)
+
         self.grid.horizontalHeader().setFixedHeight(36)
         self.grid.verticalHeader().setDefaultSectionSize(34)
         self.grid.verticalHeader().hide()
         self.grid.setSelectionBehavior(QAbstractItemView.SelectItems)
+
         self.grid.setStyleSheet(
             "QTableWidget { background: white; border: 1px solid #E5E7EB; }"
             "QHeaderView::section { background: #EEF2FF; padding: 6px; "
@@ -215,6 +219,7 @@ class SalesReturnFormView(QWidget):
     def _build_totals_and_actions(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(16)
+
         actions = QVBoxLayout()
         actions.setSpacing(8)
 
@@ -300,6 +305,11 @@ class SalesReturnFormView(QWidget):
         self.party_edit.setText(inv.party_name)
         self.currency_combo.setCurrentText(inv.currency_code)
         self.exchange_rate_spin.setValue(float(inv.exchange_rate))
+        if inv.original_invoice_id:
+            from app.models import Invoice
+            orig = self.session.get(Invoice, inv.original_invoice_id)
+            if orig:
+                self.original_invoice_edit.setText(orig.invoice_no)
 
         self.grid.blockSignals(True)
         self._close_current_editor()
@@ -309,6 +319,7 @@ class SalesReturnFormView(QWidget):
         for _ in range(max(1, 8 - len(inv.lines))):
             self._add_empty_row()
         self.grid.blockSignals(False)
+
         self._recalculate_totals()
         self._refresh_editability()
 
@@ -322,8 +333,10 @@ class SalesReturnFormView(QWidget):
             f"background-color: {color}; border-radius: 10px; padding: 3px 12px; "
             "color: white; font-weight: bold; font-size: 12px;"
         )
+
         is_posted = self.invoice is not None and self.invoice.status == InvoiceStatus.POSTED
-        for widget in (self.date_edit, self.party_edit, self.currency_combo, self.exchange_rate_spin):
+        for widget in (self.date_edit, self.party_edit, self.currency_combo,
+                       self.exchange_rate_spin, self.original_invoice_edit):
             widget.setEnabled(not is_posted)
         self.grid.setEditTriggers(
             QAbstractItemView.NoEditTriggers if is_posted else QAbstractItemView.AllEditTriggers
@@ -339,19 +352,24 @@ class SalesReturnFormView(QWidget):
         row = self.grid.rowCount()
         self.grid.insertRow(row)
         for col in range(len(GRID_COLUMNS)):
-            self.grid.setItem(row, col, _right_item(""))
+            self.grid.setItem(row, col, QTableWidgetItem(""))
 
-    def _add_row_from_line(self, line: InvoiceLine) -> None:
+    def _add_row_from_line(self, line: InvoiceLine, is_return: bool = False) -> None:
         row = self.grid.rowCount()
         self.grid.insertRow(row)
         item = line.item
-        self.grid.setItem(row, COL_CODE, _right_item(item.sku))
-        self.grid.setItem(row, COL_ITEM, _right_item(item.name_ar))
-        self.grid.setItem(row, COL_QTY, _right_item(str(line.quantity)))
-        self.grid.setItem(row, COL_PRICE, _right_item(str(line.unit_price)))
-        self.grid.setItem(row, COL_DISC, _right_item(str(line.discount_percent)))
-        self.grid.setItem(row, COL_TAX, _right_item(str(line.tax_rate)))
-        self.grid.setItem(row, COL_TOTAL, _right_item("", editable=False))
+        self.grid.setItem(row, COL_CODE, QTableWidgetItem(item.sku))
+        self.grid.setItem(row, COL_ITEM, QTableWidgetItem(item.name_ar))
+        qty = line.quantity
+        if is_return:
+            qty = abs(qty)
+        self.grid.setItem(row, COL_QTY, QTableWidgetItem(str(qty)))
+        self.grid.setItem(row, COL_PRICE, QTableWidgetItem(str(line.unit_price)))
+        self.grid.setItem(row, COL_DISC, QTableWidgetItem(str(line.discount_percent)))
+        self.grid.setItem(row, COL_TAX, QTableWidgetItem(str(line.tax_rate)))
+        total_item = QTableWidgetItem("")
+        total_item.setFlags(total_item.flags() & ~Qt.ItemIsEditable)
+        self.grid.setItem(row, COL_TOTAL, total_item)
 
     def _on_cell_changed(self, changed_item: QTableWidgetItem) -> None:
         row = changed_item.row()
@@ -361,11 +379,13 @@ class SalesReturnFormView(QWidget):
             if match:
                 self.grid.blockSignals(True)
                 self._close_current_editor()
-                self.grid.setItem(row, COL_ITEM, _right_item(match.name_ar))
+                self.grid.setItem(row, COL_ITEM, QTableWidgetItem(match.name_ar))
                 self.grid.blockSignals(False)
+
         if row == self.grid.rowCount() - 1 and self._row_has_data(row):
             self._close_current_editor()
             self._add_empty_row()
+
         self._recalculate_totals()
 
     def _row_has_data(self, row: int) -> bool:
@@ -410,12 +430,23 @@ class SalesReturnFormView(QWidget):
             self.grid.removeRow(row)
             self._recalculate_totals()
 
+    def _get_original_invoice(self) -> Invoice | None:
+        no = self.original_invoice_edit.text().strip()
+        if not no:
+            return None
+        return get_invoice_by_no(self.session, no)
+
     def _build_transient_invoice(self) -> Invoice | None:
         temp = Invoice(
-            invoice_no="TEMP", kind=InvoiceKind.SALES_RETURN,
+            invoice_no="TEMP",
+            kind=InvoiceKind.SALES_RETURN,
             currency_code=self.currency_combo.currentText(),
             exchange_rate=Decimal(str(self.exchange_rate_spin.value())),
         )
+        original = self._get_original_invoice()
+        if original:
+            temp.original_invoice_id = original.id
+
         lines = []
         for row in range(self.grid.rowCount()):
             code_item = self.grid.item(row, COL_CODE)
@@ -432,7 +463,7 @@ class SalesReturnFormView(QWidget):
             except Exception:
                 continue
             lines.append(InvoiceLine(
-                item_id=match.id, quantity=qty, unit_price=price,
+                item_id=match.id, quantity=-abs(qty), unit_price=price,
                 discount_percent=disc, discount_amount=Decimal("0"), tax_rate=tax,
             ))
         if not lines:
@@ -454,6 +485,7 @@ class SalesReturnFormView(QWidget):
             totals = compute_invoice_totals(temp)
         except Exception:
             return
+
         for row, line_total in zip(
             (r for r in range(self.grid.rowCount()) if self._row_has_data(r)), totals.lines
         ):
@@ -463,6 +495,7 @@ class SalesReturnFormView(QWidget):
             self.grid.blockSignals(True)
             total_cell.setText(str(line_total.line_grand_total))
             self.grid.blockSignals(False)
+
         self.subtotal_label.setText(str(totals.subtotal))
         self.discount_label.setText(str(totals.total_discount))
         self.tax_label.setText(str(totals.total_tax))
@@ -473,6 +506,12 @@ class SalesReturnFormView(QWidget):
         if temp is None:
             QMessageBox.warning(self, "تنبيه", "لا يوجد بنود صالحة بالمرتجع")
             return
+
+        original = self._get_original_invoice()
+        if original is None:
+            QMessageBox.warning(self, "تنبيه", "يجب تحديد الفاتورة الأصلية")
+            return
+
         if self.invoice is None:
             self.invoice = Invoice(
                 invoice_no=f"RET-{id(self)}",
@@ -481,9 +520,11 @@ class SalesReturnFormView(QWidget):
                 party_name=self.party_edit.text().strip(),
                 currency_code=self.currency_combo.currentText(),
                 exchange_rate=Decimal(str(self.exchange_rate_spin.value())),
+                original_invoice_id=original.id,
             )
             self.session.add(self.invoice)
             self.session.flush()
+
         for line in list(self.invoice.lines):
             self.session.delete(line)
         self.session.flush()
@@ -504,16 +545,26 @@ class SalesReturnFormView(QWidget):
             self._save_draft()
         if self.invoice is None:
             return
+
+        original = self._get_original_invoice()
+        if original is None:
+            QMessageBox.warning(self, "تنبيه", "يجب تحديد الفاتورة الأصلية المرحّلة")
+            return
+        if original.status != InvoiceStatus.POSTED:
+            QMessageBox.warning(self, "تنبيه", "الفاتورة الأصلية غير مرحّلة — لا يمكن عكسها")
+            return
+
         confirm = QMessageBox.question(
             self, "تأكيد الترحيل",
-            f"هل تريد ترحيل المرتجع {self.invoice.invoice_no}؟\n"
-            "لا يمكن التراجع عن هذا الإجراء.",
+            f"هل تريد ترحيل مرتجع {self.invoice.invoice_no} مقابل الفاتورة {original.invoice_no}؟\n"
+            "سيتم عكس القيد المحاسبي الأصلي بالضبط.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
             return
+
         try:
-            post_return(self.session, self.invoice)
+            post_return(self.session, original, self.invoice)
             self.session.commit()
         except (PostingError, EditNotAllowedError) as e:
             self.session.rollback()

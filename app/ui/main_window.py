@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
 
         sales_menu = menu_bar.addMenu(LABELS["sales"])
         self._add_menu_item(sales_menu, LABELS["sales_invoices"], self._open_sales_invoice_list)
-        self._add_menu_item(sales_menu, LABELS["sales_returns"], self._open_not_implemented)
+        self._add_menu_item(sales_menu, LABELS["sales_returns"], self._open_sales_return_list)
 
         purchases_menu = menu_bar.addMenu(LABELS["purchases"])
         self._add_menu_item(purchases_menu, LABELS["purchase_invoices"], self._open_not_implemented)
@@ -161,6 +161,16 @@ class MainWindow(QMainWindow):
     def _open_sales_invoice_form(self, invoice_id: int | None, title: str) -> None:
         from app.ui.sales.invoice_form import SalesInvoiceFormView
         self._open_tab(title, SalesInvoiceFormView(self.session, invoice_id=invoice_id))
+
+    def _open_sales_return_list(self) -> None:
+        from app.ui.sales.return_list import SalesReturnInvoiceListView
+        view = SalesReturnInvoiceListView(self.session)
+        view.invoice_opened.connect(self._open_sales_return_form)
+        self._open_tab(LABELS["sales_returns"], view)
+
+    def _open_sales_return_form(self, invoice_id: int | None, title: str) -> None:
+        from app.ui.sales.return_form import SalesReturnInvoiceFormView
+        self._open_tab(title, SalesReturnInvoiceFormView(self.session, invoice_id=invoice_id))
 
     def _open_not_implemented(self) -> None:
         placeholder = QWidget()
