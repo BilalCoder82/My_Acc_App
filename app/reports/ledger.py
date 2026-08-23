@@ -15,7 +15,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.models import Account, AccountType, JournalLine, JournalEntry
+from app.models import Account, AccountType, JournalLine, JournalEntry, JournalEntryStatus
 from app.services.money import D, money
 
 DEBIT_NORMAL_TYPES = {AccountType.ASSET, AccountType.EXPENSE}
@@ -62,15 +62,23 @@ def get_account_statement(
         opening_rows = session.execute(
             select(JournalLine, JournalEntry)
             .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
-            .where(JournalLine.account_id == account_id, JournalEntry.entry_date < date_from)
+            .where(
+                JournalLine.account_id == account_id,
+                JournalEntry.entry_date < date_from,
+                JournalEntry.status == JournalEntryStatus.POSTED,
+            )
         ).all()
         for line, _entry in opening_rows:
             opening_balance += _signed_balance(account.account_type, D(line.debit), D(line.credit))
 
+    # قاعدة صارمة: القيود غير المرحّلة (DRAFT/CANCELLED) لا تظهر بأي تقرير مالي إطلاقاً
     query = (
         select(JournalLine, JournalEntry)
         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
-        .where(JournalLine.account_id == account_id)
+        .where(
+            JournalLine.account_id == account_id,
+            JournalEntry.status == JournalEntryStatus.POSTED,
+        )
         .order_by(JournalEntry.entry_date, JournalEntry.id)
     )
     if date_from is not None:

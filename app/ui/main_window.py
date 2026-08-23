@@ -78,7 +78,7 @@ class MainWindow(QMainWindow):
 
         accounting_menu = menu_bar.addMenu(LABELS["accounting"])
         self._add_menu_item(accounting_menu, LABELS["coa"], self._open_chart_of_accounts)
-        self._add_menu_item(accounting_menu, LABELS["journal_vouchers"], self._open_not_implemented)
+        self._add_menu_item(accounting_menu, LABELS["journal_vouchers"], self._open_journal_voucher_list)
         self._add_menu_item(accounting_menu, LABELS["ledger"], self._open_not_implemented)
         self._add_menu_item(accounting_menu, LABELS["trial_balance"], self._open_not_implemented)
         self._add_menu_item(accounting_menu, LABELS["closing_accounts"], self._open_not_implemented)
@@ -165,6 +165,16 @@ class MainWindow(QMainWindow):
     def _open_chart_of_accounts(self) -> None:
         from app.ui.accounting.chart_of_accounts_view import ChartOfAccountsView
         self._open_window(LABELS["coa"], ChartOfAccountsView(self.session))
+
+    def _open_journal_voucher_list(self) -> None:
+        from app.ui.accounting.journal_voucher_list import JournalVoucherListView
+        view = JournalVoucherListView(self.session)
+        view.entry_opened.connect(self._open_journal_voucher_form)
+        self._open_window(LABELS["journal_vouchers"], view)
+
+    def _open_journal_voucher_form(self, entry_id: int | None, title: str) -> None:
+        from app.ui.accounting.journal_voucher_form import JournalVoucherFormView
+        self._open_window(title, JournalVoucherFormView(self.session, entry_id=entry_id), size=(1150, 800))
 
     def _open_sales_invoice_list(self) -> None:
         from app.ui.sales.invoice_list import SalesInvoiceListView

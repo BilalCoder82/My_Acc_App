@@ -12,7 +12,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 
-from app.models import Account, JournalLine, JournalEntry
+from app.models import Account, JournalLine, JournalEntry, JournalEntryStatus
 from app.services.money import money
 
 
@@ -32,6 +32,7 @@ class TrialBalanceReport:
 
 
 def get_trial_balance(session: Session, as_of_date: date | None = None) -> TrialBalanceReport:
+    # قاعدة صارمة: فقط القيود المرحّلة (POSTED) تدخل ميزان المراجعة
     query = (
         select(
             JournalLine.account_id,
@@ -39,6 +40,7 @@ def get_trial_balance(session: Session, as_of_date: date | None = None) -> Trial
             func.sum(JournalLine.credit).label("total_credit"),
         )
         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
+        .where(JournalEntry.status == JournalEntryStatus.POSTED)
         .group_by(JournalLine.account_id)
     )
     if as_of_date is not None:

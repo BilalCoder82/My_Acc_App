@@ -17,7 +17,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.models import Account, AccountType, JournalLine, JournalEntry
+from app.models import Account, AccountType, JournalLine, JournalEntry, JournalEntryStatus
 from app.services.money import D, money
 
 DEBIT_NORMAL_TYPES = {AccountType.ASSET, AccountType.EXPENSE}
@@ -33,7 +33,10 @@ def _leaf_balance(session: Session, account: Account, date_from: date | None, da
     query = (
         select(JournalLine)
         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
-        .where(JournalLine.account_id == account.id)
+        .where(
+            JournalLine.account_id == account.id,
+            JournalEntry.status == JournalEntryStatus.POSTED,
+        )
     )
     if date_from is not None:
         query = query.where(JournalEntry.entry_date >= date_from)
