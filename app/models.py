@@ -80,6 +80,12 @@ class Account(Base):
     name_ar: Mapped[str] = mapped_column(String(200))
     account_type: Mapped[AccountType] = mapped_column(Enum(AccountType))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"))
+    # عملة "وصفية" للحساب — تخبر المستخدم أي عملة يُتوقَّع أن يتعامل بها هذا
+    # الحساب عادةً (مفيد لصندوق دولار مقابل صندوق ليرة مثلاً)، لكنها **غير
+    # مفروضة برمجياً بعد**: JournalLine.line_currency_code يقبل أي عملة على
+    # أي حساب حالياً، لا تحقق يمنع قيد بعملة مخالفة لعملة الحساب المُعلَنة.
+    # فرض هذا التحقق قرار مستقبلي منفصل (لو احتجناه فعلياً)، الحقل موجود
+    # وكافٍ لبنائه لاحقاً بدون أي تعديل schema إضافي — راجع WORKFLOW.md.
     currency_code: Mapped[str] = mapped_column(String(3), default="SYP")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # حساب لا يقبل قيود مباشرة (حساب تجميعي/أب فقط)
@@ -175,9 +181,13 @@ class JournalEntry(Base):
     )
 
     def is_balanced(self) -> bool:
+        """التوازن المحاسبي الصحيح دائماً بالعملة الأساسية (debit_base/credit_base)،
+        لا بعملة المعاملة الأصلية — لأن جمع مبالغ بعملات مختلفة (دولار + يورو
+        مثلاً) مباشرة بلا تحويل غير منطقي محاسبياً. هذا صحيح للقيد أحادي العملة
+        أيضاً (base = amount × 1 حين لا يوجد تحويل)، فلا حاجة لفرع منطق منفصل."""
         from decimal import Decimal
-        debit = sum((Decimal(str(l.debit)) for l in self.lines), Decimal("0"))
-        credit = sum((Decimal(str(l.credit)) for l in self.lines), Decimal("0"))
+        debit = sum((Decimal(str(l.debit_base)) for l in self.lines), Decimal("0"))
+        credit = sum((Decimal(str(l.credit_base)) for l in self.lines), Decimal("0"))
         return (debit - credit).quantize(Decimal("0.01")) == 0
 
 
@@ -200,6 +210,12 @@ class JournalLine(Base):
     # التاريخية يجب أن تعكس السعر وقت العملية لا السعر الحالي.
     debit_base: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
     credit_base: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    # عملة وسعر صرف خاصان بهذا السطر تحديداً — فقط لسند القيد اليدوي، يسمحان
+    # بخلط عملات مختلفة بنفس القيد (مثال: تحويل نقدي دولار مقابل ليرة سورية).
+    # NULL يعني "استخدم عملة وسعر صرف القيد الافتراضيين" — القيد أحادي العملة
+    # (الحالة الشائعة، وكل الفواتير) لا يحتاج لمس هذين الحقلين إطلاقاً.
+    line_currency_code: Mapped[str | None] = mapped_column(String(3))
+    line_exchange_rate: Mapped[float | None] = mapped_column(Numeric(14, 6))
     cost_center: Mapped[str | None] = mapped_column(String(50))
 
     entry: Mapped["JournalEntry"] = relationship(back_populates="lines")

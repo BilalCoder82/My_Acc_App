@@ -36,8 +36,8 @@ def get_trial_balance(session: Session, as_of_date: date | None = None) -> Trial
     query = (
         select(
             JournalLine.account_id,
-            func.sum(JournalLine.debit).label("total_debit"),
-            func.sum(JournalLine.credit).label("total_credit"),
+            func.sum(JournalLine.debit_base).label("total_debit"),
+            func.sum(JournalLine.credit_base).label("total_credit"),
         )
         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
         .where(JournalEntry.status == JournalEntryStatus.POSTED)

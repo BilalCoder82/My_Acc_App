@@ -160,11 +160,29 @@ def _migration_v4_journal_status_and_transfers(engine: Engine) -> None:
             conn.commit()
 
 
+def _migration_v5_journal_line_currency(engine: Engine) -> None:
+    """
+    الإصدار 5: يضيف line_currency_code / line_exchange_rate بجدول journal_lines
+    — يسمحان بخلط عملات مختلفة بنفس سند القيد اليدوي (مثال: تحويل دولار
+    نقدي لليرة سورية بقيد واحد). القيم NULL افتراضياً لكل السطور القديمة —
+    تعني "استخدم عملة القيد الافتراضية"، فلا يتأثر أي قيد موجود مسبقاً.
+    """
+    with engine.connect() as conn:
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(journal_lines)"))]
+        if "line_currency_code" not in cols:
+            conn.execute(text("ALTER TABLE journal_lines ADD COLUMN line_currency_code VARCHAR(3)"))
+            conn.commit()
+        if "line_exchange_rate" not in cols:
+            conn.execute(text("ALTER TABLE journal_lines ADD COLUMN line_exchange_rate NUMERIC(14,6)"))
+            conn.commit()
+
+
 MIGRATIONS = {
     1: _migration_v1_initial_schema,
     2: _migration_v2_multi_currency_and_warehouse,
     3: _migration_v3_indexes_and_invoice_warehouse,
     4: _migration_v4_journal_status_and_transfers,
+    5: _migration_v5_journal_line_currency,
 }
 
 

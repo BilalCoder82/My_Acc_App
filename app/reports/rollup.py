@@ -45,7 +45,7 @@ def _leaf_balance(session: Session, account: Account, date_from: date | None, da
 
     balance = Decimal("0")
     for line in session.execute(query).scalars().all():
-        balance += _signed_balance(account.account_type, D(line.debit), D(line.credit))
+        balance += _signed_balance(account.account_type, D(line.debit_base), D(line.credit_base))
     return balance
 
 

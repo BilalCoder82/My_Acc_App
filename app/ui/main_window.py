@@ -149,6 +149,10 @@ class MainWindow(QMainWindow):
         window.setWindowTitle(f"{title} — {LABELS['app_title']}")
         window.setLayoutDirection(Qt.RightToLeft)
         window.resize(*size)
+        # حاسمة: بدونها، إغلاق النافذة (X) يخفيها فقط بدل تدميرها فعلياً —
+        # فتبقى "موجودة" بالـdictionary لكن مخفية للأبد، وإعادة الفتح تفشل
+        # لأنها تحاول raise_() على نافذة مخفية بدل إنشاء واحدة جديدة
+        window.setAttribute(Qt.WA_DeleteOnClose)
         layout = QVBoxLayout(window)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(widget)

@@ -11,7 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QDateEdit,
-    QTableWidget, QTableWidgetItem, QPushButton, QLabel, QHeaderView,
+    QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QPushButton, QLabel, QHeaderView,
     QMessageBox, QAbstractItemView, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QDate
@@ -23,8 +23,10 @@ from app.services.journal_edit import add_manual_line, post_manual_entry, Journa
 from app.services.account_queries import list_postable_accounts
 from app.ui.common.numeric_delegate import NumericGridDelegate, format_currency
 
-COLUMNS = ["رمز الحساب", "الحساب", "البيان", "مدين", "دائن"]
-COL_CODE, COL_ACCOUNT, COL_DESC, COL_DEBIT, COL_CREDIT = range(5)
+# البيان اختياري لكل سطر، والعملة/سعر الصرف اختياريان أيضاً (فارغ = يرث
+# عملة القيد الافتراضية بالرأس) — يسمحان بخلط عملات مختلفة بنفس القيد
+COLUMNS = ["رمز الحساب", "الحساب", "البيان", "العملة", "سعر الصرف", "مدين", "دائن"]
+COL_CODE, COL_ACCOUNT, COL_DESC, COL_CURRENCY, COL_RATE, COL_DEBIT, COL_CREDIT = range(7)
 
 COLOR_PRIMARY = "#2563EB"
 COLOR_BG = "#F5F7FA"
@@ -54,23 +56,28 @@ class JournalVoucherFormView(QWidget):
         else:
             for _ in range(8):
                 self._add_empty_row()
+            self._recalculate_totals()
 
     # -- بناء الواجهة -----------------------------------------------------
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.addWidget(self._build_header())
-        layout.addWidget(self._build_info())
+        layout.setSpacing(10)
+        layout.addWidget(self._build_header_and_info())
         layout.addWidget(self._build_grid(), stretch=1)
-        layout.addLayout(self._build_totals_and_actions())
+        layout.addWidget(self._build_summary_bar())
         self._refresh_editability()
 
-    def _build_header(self) -> QWidget:
+    def _build_header_and_info(self) -> QWidget:
+        """بطاقة واحدة مضغوطة تجمع العنوان ومعلومات القيد — بدل بطاقتين منفصلتين
+        بمساحة بيضاء زايدة بينهما."""
         card = QFrame()
         card.setStyleSheet(CARD_STYLE)
-        row = QHBoxLayout(card)
+        outer = QVBoxLayout(card)
+        outer.setSpacing(8)
+
+        title_row = QHBoxLayout()
         title = QLabel("سند قيد محاسبي")
-        f = QFont(); f.setPointSize(16); f.setBold(True)
+        f = QFont(); f.setPointSize(15); f.setBold(True)
         title.setFont(f)
         title.setStyleSheet("color: #111827;")
         self.ref_label = QLabel("جديد (غير محفوظ)")
@@ -79,22 +86,20 @@ class JournalVoucherFormView(QWidget):
         self.status_badge.setStyleSheet(
             "border-radius: 10px; padding: 3px 12px; color: white; font-weight: bold; font-size: 12px;"
         )
-        row.addWidget(title)
-        row.addWidget(self.ref_label)
-        row.addWidget(self.status_badge)
-        row.addStretch()
-        return card
+        title_row.addWidget(title)
+        title_row.addWidget(self.status_badge)
+        title_row.addWidget(self.ref_label)
+        title_row.addStretch()
+        outer.addLayout(title_row)
 
-    def _build_info(self) -> QWidget:
-        card = QFrame()
-        card.setStyleSheet(CARD_STYLE)
-        grid = QGridLayout(card)
-        grid.setHorizontalSpacing(16)
+        info_row = QHBoxLayout()
+        info_row.setSpacing(16)
 
         def labeled(text, widget, width=None):
             if width:
                 widget.setFixedWidth(width)
             box = QVBoxLayout()
+            box.setSpacing(2)
             lbl = QLabel(text)
             lbl.setStyleSheet("color: #6B7280; font-size: 11px;")
             box.addWidget(lbl)
@@ -112,29 +117,48 @@ class JournalVoucherFormView(QWidget):
         self.description_edit.setPlaceholderText("بيان القيد العام...")
         self.description_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        grid.addWidget(labeled("رقم القيد", self.ref_edit, 160), 0, 0)
-        grid.addWidget(labeled("التاريخ", self.date_edit, 140), 0, 1)
-        grid.addWidget(labeled("البيان", self.description_edit), 0, 2)
+        info_row.addWidget(labeled("رقم القيد", self.ref_edit, 140))
+        info_row.addWidget(labeled("التاريخ", self.date_edit, 130))
+        info_row.addWidget(labeled("البيان", self.description_edit), stretch=1)
+        outer.addLayout(info_row)
+
+        # عملة القيد الافتراضية — كل سطر يرثها ما لم يُخصَّص له عملة مختلفة
+        # بعمود "العملة" بالجدول (خلط عملات — راجع توثيق journal_edit.py)
+        currency_row = QHBoxLayout()
+        currency_row.setSpacing(16)
+        self.default_currency_combo = QComboBox()
+        self.default_currency_combo.addItems(["SYP", "USD", "TRY", "EUR"])
+        self.default_exchange_rate_spin = QDoubleSpinBox()
+        self.default_exchange_rate_spin.setDecimals(4)
+        self.default_exchange_rate_spin.setMaximum(1_000_000)
+        self.default_exchange_rate_spin.setValue(1)
+        currency_row.addWidget(labeled("العملة الافتراضية", self.default_currency_combo, 120))
+        currency_row.addWidget(labeled("سعر الصرف الافتراضي", self.default_exchange_rate_spin, 150))
+        currency_row.addStretch()
+        outer.addLayout(currency_row)
         return card
 
     def _build_grid(self) -> QWidget:
         self.grid = QTableWidget(0, len(COLUMNS))
         self.grid.setHorizontalHeaderLabels(COLUMNS)
         self.grid.horizontalHeader().setSectionResizeMode(COL_ACCOUNT, QHeaderView.Stretch)
-        for col in [COL_CODE, COL_DESC, COL_DEBIT, COL_CREDIT]:
+        for col in [COL_CODE, COL_DESC, COL_CURRENCY, COL_RATE, COL_DEBIT, COL_CREDIT]:
             self.grid.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
         self.grid.setColumnWidth(COL_CODE, 90)
-        self.grid.setColumnWidth(COL_DESC, 220)
-        self.grid.setColumnWidth(COL_DEBIT, 130)
-        self.grid.setColumnWidth(COL_CREDIT, 130)
+        self.grid.setColumnWidth(COL_DESC, 180)
+        self.grid.setColumnWidth(COL_CURRENCY, 80)
+        self.grid.setColumnWidth(COL_RATE, 100)
+        self.grid.setColumnWidth(COL_DEBIT, 120)
+        self.grid.setColumnWidth(COL_CREDIT, 120)
         self.grid.horizontalHeader().setFixedHeight(36)
         self.grid.verticalHeader().setDefaultSectionSize(34)
         self.grid.verticalHeader().hide()
         self.grid.setLayoutDirection(Qt.RightToLeft)
         self.grid.setSelectionBehavior(QAbstractItemView.SelectItems)
 
-        for col in [COL_DEBIT, COL_CREDIT]:
-            self.grid.setItemDelegateForColumn(col, NumericGridDelegate(2, editable=True, parent=self.grid))
+        for col in [COL_RATE, COL_DEBIT, COL_CREDIT]:
+            decimals = 4 if col == COL_RATE else 2
+            self.grid.setItemDelegateForColumn(col, NumericGridDelegate(decimals, editable=True, parent=self.grid))
 
         self.grid.setStyleSheet(
             "QTableWidget { background: white; border: 1px solid #E5E7EB; }"
@@ -145,66 +169,76 @@ class JournalVoucherFormView(QWidget):
         self.grid.installEventFilter(self)
         return self.grid
 
-    def _build_totals_and_actions(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(16)
+    def _build_summary_bar(self) -> QWidget:
+        """شريط ملخص سفلي موحّد — بدل تقسيم الإجماليات والأزرار لصندوقين منفصلين."""
+        card = QFrame()
+        card.setStyleSheet(CARD_STYLE)
+        row = QHBoxLayout(card)
+        row.setSpacing(24)
 
-        actions = QVBoxLayout()
-        post_btn = QPushButton("ترحيل")
-        post_btn.setStyleSheet(
-            f"background-color: {COLOR_PRIMARY}; color: white; font-weight: bold; "
-            "padding: 10px 24px; border-radius: 4px; font-size: 13px;"
-        )
-        post_btn.clicked.connect(self._post)
-        save_btn = QPushButton("حفظ مسودة")
-        save_btn.setStyleSheet("padding: 8px 20px; border: 1px solid #D1D5DB; border-radius: 4px; background: white;")
-        save_btn.clicked.connect(self._save_draft)
-        actions.addWidget(post_btn)
-        actions.addWidget(save_btn)
-        actions.addStretch()
+        def summary_item(title: str) -> QLabel:
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            lbl = QLabel(title)
+            lbl.setStyleSheet("color: #6B7280; font-size: 11px;")
+            value = QLabel("0.00")
+            value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
+            box.addWidget(lbl)
+            box.addWidget(value)
+            container = QWidget()
+            container.setLayout(box)
+            row.addWidget(container)
+            return value
 
-        totals_card = QFrame()
-        totals_card.setStyleSheet(CARD_STYLE)
-        totals_card.setFixedWidth(300)
-        t = QVBoxLayout(totals_card)
+        self.debit_total_label = summary_item("إجمالي المدين")
+        self.credit_total_label = summary_item("إجمالي الدائن")
 
-        self.debit_total_label = self._totals_row(t, "إجمالي المدين", "0.00")
-        self.credit_total_label = self._totals_row(t, "إجمالي الدائن", "0.00")
-
-        line = QFrame(); line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("background: #E5E7EB;"); line.setFixedHeight(1)
-        t.addWidget(line)
-
-        diff_row = QHBoxLayout()
+        diff_box = QVBoxLayout()
+        diff_box.setSpacing(2)
         diff_title = QLabel("الفرق")
-        diff_title.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.diff_label = QLabel("0.00 ✓")
+        diff_title.setStyleSheet("color: #6B7280; font-size: 11px;")
+        self.diff_label = QLabel("0.00 ✓ متوازن")
         self.diff_label.setStyleSheet(
-            "font-weight: bold; font-size: 16px; color: #16A34A; "
-            "background-color: #F0FDF4; padding: 6px 14px; border-radius: 6px;"
+            "font-weight: bold; font-size: 14px; color: #16A34A; "
+            "background-color: #F0FDF4; padding: 4px 12px; border-radius: 6px;"
         )
-        diff_row.addWidget(diff_title)
-        diff_row.addStretch()
-        diff_row.addWidget(self.diff_label)
-        t.addLayout(diff_row)
+        diff_box.addWidget(diff_title)
+        diff_box.addWidget(self.diff_label)
+        diff_container = QWidget()
+        diff_container.setLayout(diff_box)
+        row.addWidget(diff_container)
 
-        row.addLayout(actions)
         row.addStretch()
-        row.addWidget(totals_card)
-        return row
 
-    @staticmethod
-    def _totals_row(layout, title, value) -> QLabel:
-        r = QHBoxLayout()
-        lbl = QLabel(title)
-        lbl.setStyleSheet("color: #4B5563; font-size: 12px;")
-        r.addWidget(lbl)
-        r.addStretch()
-        v = QLabel(value)
-        v.setStyleSheet("font-size: 13px; font-weight: 500;")
-        r.addWidget(v)
-        layout.addLayout(r)
-        return v
+        self.save_btn = QPushButton("حفظ مسودة")
+        self.save_btn.setStyleSheet(
+            "padding: 8px 20px; border: 1px solid #D1D5DB; border-radius: 4px; background: white;"
+        )
+        self.save_btn.clicked.connect(self._save_draft)
+
+        self.post_btn = QPushButton("ترحيل")
+        self.post_btn.clicked.connect(self._post)
+
+        row.addWidget(self.save_btn)
+        row.addWidget(self.post_btn)
+        return card
+
+    def _apply_post_button_state(self, is_balanced: bool) -> None:
+        """تعطيل بصري لزر الترحيل لما القيد غير متوازن — تجربة أفضل من
+        السماح بالضغط ثم إظهار رسالة خطأ. الحماية الفعلية تبقى بالـservice
+        دائماً بغض النظر عن حالة هذا الزر."""
+        if is_balanced:
+            self.post_btn.setEnabled(True)
+            self.post_btn.setStyleSheet(
+                f"background-color: {COLOR_PRIMARY}; color: white; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 13px;"
+            )
+        else:
+            self.post_btn.setEnabled(False)
+            self.post_btn.setStyleSheet(
+                "background-color: #D1D5DB; color: #6B7280; font-weight: bold; "
+                "padding: 10px 24px; border-radius: 4px; font-size: 13px;"
+            )
 
     # -- تحميل قيد موجود -----------------------------------------------------
     def _load_entry(self) -> None:
@@ -213,6 +247,8 @@ class JournalVoucherFormView(QWidget):
         self.ref_edit.setText(e.ref_no)
         self.date_edit.setDate(QDate(e.entry_date.year, e.entry_date.month, e.entry_date.day))
         self.description_edit.setText(e.description or "")
+        self.default_currency_combo.setCurrentText(e.currency_code)
+        self.default_exchange_rate_spin.setValue(float(e.exchange_rate))
 
         self.grid.blockSignals(True)
         self._close_current_editor()
@@ -222,7 +258,11 @@ class JournalVoucherFormView(QWidget):
             self.grid.insertRow(row)
             self.grid.setItem(row, COL_CODE, QTableWidgetItem(line.account.code))
             self.grid.setItem(row, COL_ACCOUNT, QTableWidgetItem(line.account.name_ar))
-            self.grid.setItem(row, COL_DESC, QTableWidgetItem("") )
+            self.grid.setItem(row, COL_DESC, QTableWidgetItem(""))
+            self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(line.line_currency_code or ""))
+            self.grid.setItem(row, COL_RATE, QTableWidgetItem(
+                str(line.line_exchange_rate) if line.line_exchange_rate else ""
+            ))
             self.grid.setItem(row, COL_DEBIT, QTableWidgetItem(str(line.debit) if line.debit else ""))
             self.grid.setItem(row, COL_CREDIT, QTableWidgetItem(str(line.credit) if line.credit else ""))
         for _ in range(max(1, 8 - len(e.lines))):
@@ -283,7 +323,6 @@ class JournalVoucherFormView(QWidget):
             self.grid.blockSignals(True)
             self.grid.setItem(row, COL_DEBIT, QTableWidgetItem(""))
             self.grid.blockSignals(False)
-
         if row == self.grid.rowCount() - 1 and self._row_has_data(row):
             self._close_current_editor()
             self._add_empty_row()
@@ -327,33 +366,40 @@ class JournalVoucherFormView(QWidget):
 
     # -- الحساب الحي -----------------------------------------------------
     def _recalculate_totals(self) -> None:
-        total_debit, total_credit = Decimal("0"), Decimal("0")
+        """الفرق اللحظي يُحسب بالعملة الأساسية دائماً (مثل is_balanced() الفعلي
+        بالخدمة) — وإلا يظهر "متوازن" مضلِّلاً لقيد فيه سطور بعملات مختلفة."""
+        default_rate = Decimal(str(self.default_exchange_rate_spin.value()))
+        total_debit_base, total_credit_base = Decimal("0"), Decimal("0")
         for row in range(self.grid.rowCount()):
             if not self._row_has_data(row):
                 continue
             try:
                 d = Decimal((self.grid.item(row, COL_DEBIT).text() or "0").replace(",", ""))
                 c = Decimal((self.grid.item(row, COL_CREDIT).text() or "0").replace(",", ""))
+                rate_text = (self.grid.item(row, COL_RATE).text() or "").replace(",", "").strip()
+                effective_rate = Decimal(rate_text) if rate_text else default_rate
             except Exception:
                 continue
-            total_debit += d
-            total_credit += c
+            total_debit_base += d * effective_rate
+            total_credit_base += c * effective_rate
 
-        self.debit_total_label.setText(format_currency(total_debit, "SYP"))
-        self.credit_total_label.setText(format_currency(total_credit, "SYP"))
-        diff = total_debit - total_credit
+        base_currency = "SYP"  # عملة الشركة الأساسية — التوازن دائماً بها
+        self.debit_total_label.setText(format_currency(total_debit_base, base_currency))
+        self.credit_total_label.setText(format_currency(total_credit_base, base_currency))
+        diff = total_debit_base - total_credit_base
         if diff == 0:
             self.diff_label.setText(f"{diff} ✓ متوازن")
             self.diff_label.setStyleSheet(
-                "font-weight: bold; font-size: 16px; color: #16A34A; "
-                "background-color: #F0FDF4; padding: 6px 14px; border-radius: 6px;"
+                "font-weight: bold; font-size: 14px; color: #16A34A; "
+                "background-color: #F0FDF4; padding: 4px 12px; border-radius: 6px;"
             )
         else:
             self.diff_label.setText(f"{diff} ⚠ غير متوازن")
             self.diff_label.setStyleSheet(
-                "font-weight: bold; font-size: 16px; color: #DC2626; "
-                "background-color: #FEF2F2; padding: 6px 14px; border-radius: 6px;"
+                "font-weight: bold; font-size: 14px; color: #DC2626; "
+                "background-color: #FEF2F2; padding: 4px 12px; border-radius: 6px;"
             )
+        self._apply_post_button_state(diff == 0)
 
     # -- حفظ وترحيل --------------------------------------------------------
     def _next_ref_no(self) -> str:
@@ -363,18 +409,23 @@ class JournalVoucherFormView(QWidget):
         return f"JV-{count + 1:06d}"
 
     def _save_draft(self) -> None:
+        default_currency = self.default_currency_combo.currentText()
+        default_rate = Decimal(str(self.default_exchange_rate_spin.value()))
+
         if self.entry is None:
             self.entry = JournalEntry(
                 entry_date=self.date_edit.date().toPython(),
                 ref_no=self._next_ref_no(),
                 description=self.description_edit.text().strip(),
-                source_type="manual", currency_code="SYP", exchange_rate=1,
+                source_type="manual", currency_code=default_currency, exchange_rate=default_rate,
                 status=JournalEntryStatus.DRAFT,
             )
             self.session.add(self.entry)
             self.session.flush()
         else:
             self.entry.description = self.description_edit.text().strip()
+            self.entry.currency_code = default_currency
+            self.entry.exchange_rate = default_rate
             for line in list(self.entry.lines):
                 self.session.delete(line)
             self.session.flush()
@@ -390,10 +441,18 @@ class JournalVoucherFormView(QWidget):
                 continue
             debit_txt = (self.grid.item(row, COL_DEBIT).text() or "0").replace(",", "")
             credit_txt = (self.grid.item(row, COL_CREDIT).text() or "0").replace(",", "")
+            # عملة/سعر خاصان بهذا السطر فقط لو المستخدم فعلاً عبّاهم — وإلا
+            # None فيرث السطر عملة القيد الافتراضية (السلوك القديم بدون تغيير)
+            line_currency_txt = (self.grid.item(row, COL_CURRENCY).text() or "").strip()
+            line_rate_txt = (self.grid.item(row, COL_RATE).text() or "").replace(",", "").strip()
+            line_currency_code = line_currency_txt or None
+            line_exchange_rate = Decimal(line_rate_txt) if line_rate_txt else None
             try:
                 add_manual_line(
                     self.session, self.entry, account_id=match.id,
                     debit=debit_txt or 0, credit=credit_txt or 0,
+                    exchange_rate=default_rate,
+                    line_currency_code=line_currency_code, line_exchange_rate=line_exchange_rate,
                 )
             except JournalEditError as e:
                 errors.append(f"السطر {row+1}: {e}")

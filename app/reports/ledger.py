@@ -69,7 +69,7 @@ def get_account_statement(
             )
         ).all()
         for line, _entry in opening_rows:
-            opening_balance += _signed_balance(account.account_type, D(line.debit), D(line.credit))
+            opening_balance += _signed_balance(account.account_type, D(line.debit_base), D(line.credit_base))
 
     # قاعدة صارمة: القيود غير المرحّلة (DRAFT/CANCELLED) لا تظهر بأي تقرير مالي إطلاقاً
     query = (
@@ -89,10 +89,11 @@ def get_account_statement(
     rows: list[LedgerRow] = []
     running = opening_balance
     for line, entry in session.execute(query).all():
-        running += _signed_balance(account.account_type, D(line.debit), D(line.credit))
+        running += _signed_balance(account.account_type, D(line.debit_base), D(line.credit_base))
         rows.append(LedgerRow(
             entry_date=entry.entry_date, ref_no=entry.ref_no, description=entry.description,
-            debit=D(line.debit), credit=D(line.credit), running_balance=money(running),
+            # نعرض القيمة بالعملة الأساسية دائماً — متسق مع منطق التوازن (راجع models.is_balanced)
+            debit=D(line.debit_base), credit=D(line.credit_base), running_balance=money(running),
         ))
 
     return AccountStatement(
