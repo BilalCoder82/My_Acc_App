@@ -34,5 +34,18 @@ def money(value) -> Decimal:
     return D(value).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
 
 
+RATE_QUANT = Decimal("0.000001")
+
+
+def rate(value) -> Decimal:
+    """تُطبَّق على أي سعر صرف يُقرأ من قاعدة البيانات أو يُدخَل بالواجهة —
+    نفس مبدأ money()، لكن بدقة 6 منازل (مناسبة لأسعار الصرف، لا 2 منزلة).
+    ضرورية تحديداً بعد إعادة القراءة من SQLite: التخزين الفعلي REAL تقريبي،
+    وقيمة مثل 1.0 ممكن ترجع 0.999999999... وتتضخّم لخطأ ملحوظ عند الضرب
+    بمبالغ كبيرة (اكتُشف فعلياً: سعر صرف 1 تحوّل لفرق توازن 8×10⁻⁸ بعد
+    إعادة تحميل قيد من القاعدة — كان بيظهر "8E-8" بدل "0" بالضبط)."""
+    return D(value).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+
+
 def qty(value) -> Decimal:
     return D(value).quantize(QTY_QUANT, rounding=ROUND_HALF_UP)

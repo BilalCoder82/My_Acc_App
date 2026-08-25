@@ -22,11 +22,19 @@ from app.models import JournalEntry, JournalEntryStatus
 from app.services.journal_edit import add_manual_line, post_manual_entry, JournalEditError
 from app.services.account_queries import list_postable_accounts
 from app.ui.common.numeric_delegate import NumericGridDelegate, format_currency
+from app.ui.common.currency_combo_delegate import CurrencyComboDelegate
+from app.services.money import rate as rate_, money as money_
 
-# البيان اختياري لكل سطر، والعملة/سعر الصرف اختياريان أيضاً (فارغ = يرث
-# عملة القيد الافتراضية بالرأس) — يسمحان بخلط عملات مختلفة بنفس القيد
-COLUMNS = ["رمز الحساب", "الحساب", "البيان", "العملة", "سعر الصرف", "مدين", "دائن"]
-COL_CODE, COL_ACCOUNT, COL_DESC, COL_CURRENCY, COL_RATE, COL_DEBIT, COL_CREDIT = range(7)
+# البيان اختياري لكل سطر. العملة تُختار من ComboBox (فارغ = يرث عملة القيد
+# الافتراضية بالرأس). "مدين/دائن بالأساسية" محسوبان آلياً، غير قابلين للتحرير
+# — يعكسان debit_base/credit_base بالضبط، ولا يجوز إدخالهما يدوياً إطلاقاً
+# (نفس مبدأ منع تعديل الإجمالي بالفواتير).
+COLUMNS = [
+    "رمز الحساب", "الحساب", "البيان", "العملة", "سعر الصرف",
+    "مدين", "دائن", "مدين بالأساسية", "دائن بالأساسية",
+]
+(COL_CODE, COL_ACCOUNT, COL_DESC, COL_CURRENCY, COL_RATE,
+ COL_DEBIT, COL_CREDIT, COL_DEBIT_BASE, COL_CREDIT_BASE) = range(9)
 
 COLOR_PRIMARY = "#2563EB"
 COLOR_BG = "#F5F7FA"
@@ -142,23 +150,31 @@ class JournalVoucherFormView(QWidget):
         self.grid = QTableWidget(0, len(COLUMNS))
         self.grid.setHorizontalHeaderLabels(COLUMNS)
         self.grid.horizontalHeader().setSectionResizeMode(COL_ACCOUNT, QHeaderView.Stretch)
-        for col in [COL_CODE, COL_DESC, COL_CURRENCY, COL_RATE, COL_DEBIT, COL_CREDIT]:
+        fixed_cols = [COL_CODE, COL_DESC, COL_CURRENCY, COL_RATE, COL_DEBIT, COL_DEBIT_BASE, COL_CREDIT, COL_CREDIT_BASE]
+        for col in fixed_cols:
             self.grid.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
         self.grid.setColumnWidth(COL_CODE, 90)
-        self.grid.setColumnWidth(COL_DESC, 180)
+        self.grid.setColumnWidth(COL_DESC, 150)
         self.grid.setColumnWidth(COL_CURRENCY, 80)
-        self.grid.setColumnWidth(COL_RATE, 100)
-        self.grid.setColumnWidth(COL_DEBIT, 120)
-        self.grid.setColumnWidth(COL_CREDIT, 120)
+        self.grid.setColumnWidth(COL_RATE, 95)
+        self.grid.setColumnWidth(COL_DEBIT, 105)
+        self.grid.setColumnWidth(COL_CREDIT, 105)
+        self.grid.setColumnWidth(COL_DEBIT_BASE, 120)
+        self.grid.setColumnWidth(COL_CREDIT_BASE, 120)
         self.grid.horizontalHeader().setFixedHeight(36)
         self.grid.verticalHeader().setDefaultSectionSize(34)
         self.grid.verticalHeader().hide()
         self.grid.setLayoutDirection(Qt.RightToLeft)
         self.grid.setSelectionBehavior(QAbstractItemView.SelectItems)
 
-        for col in [COL_RATE, COL_DEBIT, COL_CREDIT]:
-            decimals = 4 if col == COL_RATE else 2
-            self.grid.setItemDelegateForColumn(col, NumericGridDelegate(decimals, editable=True, parent=self.grid))
+        self.grid.setItemDelegateForColumn(COL_CURRENCY, CurrencyComboDelegate(self.grid))
+        # كل الأعمدة الرقمية قابلة للتحرير الآن — بما فيها المعادل الأساسي.
+        # العلاقة ديناميكية بالاتجاهين (راجع _derive_base_from_amount_and_rate
+        # و_derive_rate_from_amount_and_base): آخر حقل عدّله المستخدم هو
+        # مصدر الحقيقة لهذا التغيير، والحقل الآخر (سعر الصرف أو المعادل) يُحسب
+        # منه تلقائياً — بدون أي إصلاح تلقائي لفرق حقيقي بين الطرفين.
+        for col in [COL_RATE, COL_DEBIT, COL_CREDIT, COL_DEBIT_BASE, COL_CREDIT_BASE]:
+            self.grid.setItemDelegateForColumn(col, NumericGridDelegate(4 if col == COL_RATE else 2, editable=True, parent=self.grid))
 
         self.grid.setStyleSheet(
             "QTableWidget { background: white; border: 1px solid #E5E7EB; }"
@@ -182,6 +198,7 @@ class JournalVoucherFormView(QWidget):
             lbl = QLabel(title)
             lbl.setStyleSheet("color: #6B7280; font-size: 11px;")
             value = QLabel("0.00")
+            value.setMinimumWidth(140)
             value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
             box.addWidget(lbl)
             box.addWidget(value)
@@ -248,7 +265,9 @@ class JournalVoucherFormView(QWidget):
         self.date_edit.setDate(QDate(e.entry_date.year, e.entry_date.month, e.entry_date.day))
         self.description_edit.setText(e.description or "")
         self.default_currency_combo.setCurrentText(e.currency_code)
-        self.default_exchange_rate_spin.setValue(float(e.exchange_rate))
+        # rate_() ينظّف أي شائبة float متبقية من إعادة القراءة عبر SQLite
+        # (راجع توثيق money.py) قبل ما تدخل بأي حساب لاحق بالواجهة
+        self.default_exchange_rate_spin.setValue(float(rate_(e.exchange_rate)))
 
         self.grid.blockSignals(True)
         self._close_current_editor()
@@ -261,10 +280,12 @@ class JournalVoucherFormView(QWidget):
             self.grid.setItem(row, COL_DESC, QTableWidgetItem(""))
             self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(line.line_currency_code or ""))
             self.grid.setItem(row, COL_RATE, QTableWidgetItem(
-                str(line.line_exchange_rate) if line.line_exchange_rate else ""
+                str(rate_(line.line_exchange_rate)) if line.line_exchange_rate else ""
             ))
             self.grid.setItem(row, COL_DEBIT, QTableWidgetItem(str(line.debit) if line.debit else ""))
             self.grid.setItem(row, COL_CREDIT, QTableWidgetItem(str(line.credit) if line.credit else ""))
+            self.grid.setItem(row, COL_DEBIT_BASE, QTableWidgetItem(str(line.debit_base) if line.debit else ""))
+            self.grid.setItem(row, COL_CREDIT_BASE, QTableWidgetItem(str(line.credit_base) if line.credit else ""))
         for _ in range(max(1, 8 - len(e.lines))):
             self._add_empty_row()
         self.grid.blockSignals(False)
@@ -294,6 +315,12 @@ class JournalVoucherFormView(QWidget):
         if current:
             self.grid.closePersistentEditor(current)
 
+    @staticmethod
+    def _readonly_item(value) -> QTableWidgetItem:
+        item = QTableWidgetItem(str(value) if value else "")
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        return item
+
     # -- الشبكة --------------------------------------------------------------
     def _add_empty_row(self) -> None:
         self._close_current_editor()
@@ -306,23 +333,80 @@ class JournalVoucherFormView(QWidget):
         code_item = self.grid.item(row, COL_CODE)
         return bool(code_item and code_item.text().strip())
 
+    def _cell_text(self, row: int, col: int) -> str:
+        item = self.grid.item(row, col)
+        return (item.text() if item else "").replace(",", "").strip()
+
+    def _set_cell_silently(self, row: int, col: int, text: str) -> None:
+        self.grid.blockSignals(True)
+        self.grid.setItem(row, col, QTableWidgetItem(text))
+        self.grid.blockSignals(False)
+
+    def _default_rate(self) -> Decimal:
+        return rate_(Decimal(str(self.default_exchange_rate_spin.value())))
+
+    def _derive_base_from_amount_and_rate(self, row: int, amount_col: int, base_col: int) -> None:
+        """المبلغ أو سعر الصرف تغيّر → نعيد حساب المعادل الأساسي منهما."""
+        amount_text = self._cell_text(row, amount_col)
+        if not amount_text:
+            self._set_cell_silently(row, base_col, "")
+            return
+        try:
+            amount = Decimal(amount_text)
+        except Exception:
+            return
+        rate_text = self._cell_text(row, COL_RATE)
+        effective_rate = rate_(rate_text) if rate_text else self._default_rate()
+        self._set_cell_silently(row, base_col, str(money_(amount * effective_rate)))
+
+    def _derive_rate_from_amount_and_base(self, row: int, amount_col: int, base_col: int) -> None:
+        """المستخدم عدّل المعادل الأساسي مباشرة → نستنتج سعر الصرف المطابق،
+        بدل ما نجبره يحسب القسمة يدوياً (طلب صريح من صديق المستخدم)."""
+        amount_text = self._cell_text(row, amount_col)
+        base_text = self._cell_text(row, base_col)
+        if not amount_text or not base_text:
+            return
+        try:
+            amount = Decimal(amount_text)
+            base_value = Decimal(base_text)
+            if amount == 0:
+                return
+            new_rate = rate_(base_value / amount)
+        except Exception:
+            return
+        self._set_cell_silently(row, COL_RATE, str(new_rate))
+
     def _on_cell_changed(self, changed_item: QTableWidgetItem) -> None:
-        row = changed_item.row()
-        if changed_item.column() == COL_CODE:
+        row, col = changed_item.row(), changed_item.column()
+
+        if col == COL_CODE:
             code = changed_item.text().strip()
             match = next((a for a in self._accounts_cache if a.code == code), None)
             if match:
-                self.grid.blockSignals(True)
-                self.grid.setItem(row, COL_ACCOUNT, QTableWidgetItem(match.name_ar))
-                self.grid.blockSignals(False)
-        elif changed_item.column() == COL_DEBIT and changed_item.text().strip():
-            self.grid.blockSignals(True)
-            self.grid.setItem(row, COL_CREDIT, QTableWidgetItem(""))
-            self.grid.blockSignals(False)
-        elif changed_item.column() == COL_CREDIT and changed_item.text().strip():
-            self.grid.blockSignals(True)
-            self.grid.setItem(row, COL_DEBIT, QTableWidgetItem(""))
-            self.grid.blockSignals(False)
+                self._set_cell_silently(row, COL_ACCOUNT, match.name_ar)
+
+        elif col == COL_DEBIT and changed_item.text().strip():
+            self._set_cell_silently(row, COL_CREDIT, "")
+            self._set_cell_silently(row, COL_CREDIT_BASE, "")
+            self._derive_base_from_amount_and_rate(row, COL_DEBIT, COL_DEBIT_BASE)
+
+        elif col == COL_CREDIT and changed_item.text().strip():
+            self._set_cell_silently(row, COL_DEBIT, "")
+            self._set_cell_silently(row, COL_DEBIT_BASE, "")
+            self._derive_base_from_amount_and_rate(row, COL_CREDIT, COL_CREDIT_BASE)
+
+        elif col == COL_RATE:
+            # سعر الصرف يخص أي طرف مُدخل بهذا السطر (مدين أو دائن، واحد فقط
+            # منهما فعلياً بحكم قاعدة عدم الجمع بنفس السطر)
+            self._derive_base_from_amount_and_rate(row, COL_DEBIT, COL_DEBIT_BASE)
+            self._derive_base_from_amount_and_rate(row, COL_CREDIT, COL_CREDIT_BASE)
+
+        elif col == COL_DEBIT_BASE and changed_item.text().strip():
+            self._derive_rate_from_amount_and_base(row, COL_DEBIT, COL_DEBIT_BASE)
+
+        elif col == COL_CREDIT_BASE and changed_item.text().strip():
+            self._derive_rate_from_amount_and_base(row, COL_CREDIT, COL_CREDIT_BASE)
+
         if row == self.grid.rowCount() - 1 and self._row_has_data(row):
             self._close_current_editor()
             self._add_empty_row()
@@ -366,22 +450,22 @@ class JournalVoucherFormView(QWidget):
 
     # -- الحساب الحي -----------------------------------------------------
     def _recalculate_totals(self) -> None:
-        """الفرق اللحظي يُحسب بالعملة الأساسية دائماً (مثل is_balanced() الفعلي
-        بالخدمة) — وإلا يظهر "متوازن" مضلِّلاً لقيد فيه سطور بعملات مختلفة."""
-        default_rate = Decimal(str(self.default_exchange_rate_spin.value()))
+        """يقرأ فقط — لا يكتب فوق عمودي المعادل، لأنهما صارا قابلين للتحرير
+        اليدوي المباشر (`_derive_base_from_amount_and_rate` و
+        `_derive_rate_from_amount_and_base` هما المسؤولان الوحيدان عن حساب
+        قيمة المعادل أو السعر آلياً، ولا يكتبان فوق تعديل يدوي أحدث).
+        الفرق اللحظي دائماً بالعملة الأساسية — لا جمع لعملات مختلفة مباشرة."""
         total_debit_base, total_credit_base = Decimal("0"), Decimal("0")
         for row in range(self.grid.rowCount()):
             if not self._row_has_data(row):
                 continue
             try:
-                d = Decimal((self.grid.item(row, COL_DEBIT).text() or "0").replace(",", ""))
-                c = Decimal((self.grid.item(row, COL_CREDIT).text() or "0").replace(",", ""))
-                rate_text = (self.grid.item(row, COL_RATE).text() or "").replace(",", "").strip()
-                effective_rate = Decimal(rate_text) if rate_text else default_rate
+                db = Decimal(self._cell_text(row, COL_DEBIT_BASE) or "0")
+                cb = Decimal(self._cell_text(row, COL_CREDIT_BASE) or "0")
             except Exception:
                 continue
-            total_debit_base += d * effective_rate
-            total_credit_base += c * effective_rate
+            total_debit_base += db
+            total_credit_base += cb
 
         base_currency = "SYP"  # عملة الشركة الأساسية — التوازن دائماً بها
         self.debit_total_label.setText(format_currency(total_debit_base, base_currency))

@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.models import JournalEntry, JournalLine, JournalEntryStatus
-from app.services.money import money
+from app.services.money import money, rate as rate_
 
 
 class JournalEditError(Exception):
@@ -120,7 +120,7 @@ def add_manual_line(session: Session, entry: JournalEntry, account_id: int,
     if d == 0 and c == 0:
         raise JournalEditError("لازم إدخال مبلغ مدين أو دائن — لا يجوز سطر فارغ")
 
-    effective_rate = money(line_exchange_rate if line_exchange_rate is not None else exchange_rate)
+    effective_rate = rate_(line_exchange_rate if line_exchange_rate is not None else exchange_rate)
     line = JournalLine(
         entry_id=entry.id, account_id=account_id, debit=d, credit=c,
         debit_base=money(d * effective_rate), credit_base=money(c * effective_rate),
