@@ -14,21 +14,28 @@ from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QPushButton, QLabel, QHeaderView,
     QMessageBox, QAbstractItemView, QFrame, QSizePolicy
 )
-from PySide6.QtCore import Qt, QDate
+from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
 from sqlalchemy.orm import Session
 
 from app.models import JournalEntry, JournalEntryStatus
 from app.services.journal_edit import add_manual_line, post_manual_entry, JournalEditError
 from app.services.account_queries import list_postable_accounts
-from app.ui.common.numeric_delegate import NumericGridDelegate, format_currency
+from app.ui.common.numeric_delegate import NumericGridDelegate, PlainTextGridDelegate, format_currency
 from app.ui.common.currency_combo_delegate import CurrencyComboDelegate
 from app.services.money import rate as rate_, money as money_
 
-# البيان اختياري لكل سطر. العملة تُختار من ComboBox (فارغ = يرث عملة القيد
-# الافتراضية بالرأس). "مدين/دائن بالأساسية" محسوبان آلياً، غير قابلين للتحرير
-# — يعكسان debit_base/credit_base بالضبط، ولا يجوز إدخالهما يدوياً إطلاقاً
-# (نفس مبدأ منع تعديل الإجمالي بالفواتير).
+# البيان اختياري لكل سطر. العملة والمعادل الأساسي وسعر الصرف كلها أعمدة
+# قابلة للتحرير يدوياً بالكامل (راجع _derive_base_from_amount_and_rate /
+# _derive_rate_from_amount_and_base) — "مدين/دائن بالأساسية" ليسا للعرض
+# فقط، بل يمكن تعديلهما مباشرة والنظام يستنتج سعر الصرف المطابق تلقائياً.
+#
+# العملة وسعر الصرف الافتراضيان بالرأس (default_currency_combo /
+# default_exchange_rate_spin) يُطبَّقان تلقائياً على أي سطر جديد فور
+# إنشائه (_add_empty_row) — المحاسب غير مضطر لفتح ComboBox العملة يدوياً
+# بكل سطر. لو غيّر المحاسب عملة/سعر سطر بعينه يدوياً، يُسجَّل هذا السطر
+# بمجموعة "معدَّل يدوياً" (_manual_currency_rows / _manual_rate_rows)
+# فلا يُعاد الكتابة فوقه لو غيّر المحاسب لاحقاً القيمة الافتراضية بالرأس.
 COLUMNS = [
     "رمز الحساب", "الحساب", "البيان", "العملة", "سعر الصرف",
     "مدين", "دائن", "مدين بالأساسية", "دائن بالأساسية",
@@ -53,9 +60,19 @@ class JournalVoucherFormView(QWidget):
         self.session = session
         self.entry: JournalEntry | None = session.get(JournalEntry, entry_id) if entry_id else None
         self._accounts_cache = list_postable_accounts(session)
+        # صفوف غيّر فيها المحاسب العملة/سعر الصرف يدوياً — لا تتبع تغيّر
+        # القيمة الافتراضية بالرأس بعد ذلك. راجع _on_default_currency_changed
+        # و_on_default_rate_changed.
+        self._manual_currency_rows: set[int] = set()
+        self._manual_rate_rows: set[int] = set()
 
         self.setStyleSheet(f"background-color: {COLOR_BG};")
         self._build_ui()
+        # يُوصَل بعد بناء الرأس والشبكة معاً — لو وُصِل داخل بناء الرأس
+        # نفسه، فإن addItems/setValue الأوليين يُطلقان الإشارة قبل وجود
+        # self.grid أصلاً.
+        self.default_currency_combo.currentTextChanged.connect(self._on_default_currency_changed)
+        self.default_exchange_rate_spin.valueChanged.connect(self._on_default_rate_changed)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_draft)
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self._post)
 
@@ -167,14 +184,35 @@ class JournalVoucherFormView(QWidget):
         self.grid.setLayoutDirection(Qt.RightToLeft)
         self.grid.setSelectionBehavior(QAbstractItemView.SelectItems)
 
-        self.grid.setItemDelegateForColumn(COL_CURRENCY, CurrencyComboDelegate(self.grid))
+        # كل خلية قابلة للتحرير بالشبكة — بما فيها رمز الحساب والبيان —
+        # تأخذ delegate يمرّر Enter عبر مسار التنقل الموحّد self._move_to_next_cell
+        # (راجع شرح "مسار Enter الموحّد" أعلى numeric_delegate.py). قبل هذا
+        # كان لعمودي الرمز/البيان معالجة Enter افتراضية من كيوت مختلفة تماماً
+        # عن بقية الأعمدة، وهذا التعارض بين مسارين مختلفين لنفس الضغطة هو
+        # سبب تحذير الطرفية 'commitData called with an editor that does not
+        # belong to this view'.
+        self.grid.setItemDelegateForColumn(
+            COL_CODE, PlainTextGridDelegate(parent=self.grid, on_return=self._move_to_next_cell)
+        )
+        self.grid.setItemDelegateForColumn(
+            COL_DESC, PlainTextGridDelegate(parent=self.grid, on_return=self._move_to_next_cell)
+        )
+        self.grid.setItemDelegateForColumn(
+            COL_CURRENCY, CurrencyComboDelegate(self.grid, on_return=self._move_to_next_cell)
+        )
         # كل الأعمدة الرقمية قابلة للتحرير الآن — بما فيها المعادل الأساسي.
         # العلاقة ديناميكية بالاتجاهين (راجع _derive_base_from_amount_and_rate
         # و_derive_rate_from_amount_and_base): آخر حقل عدّله المستخدم هو
         # مصدر الحقيقة لهذا التغيير، والحقل الآخر (سعر الصرف أو المعادل) يُحسب
         # منه تلقائياً — بدون أي إصلاح تلقائي لفرق حقيقي بين الطرفين.
         for col in [COL_RATE, COL_DEBIT, COL_CREDIT, COL_DEBIT_BASE, COL_CREDIT_BASE]:
-            self.grid.setItemDelegateForColumn(col, NumericGridDelegate(4 if col == COL_RATE else 2, editable=True, parent=self.grid))
+            self.grid.setItemDelegateForColumn(
+                col,
+                NumericGridDelegate(
+                    4 if col == COL_RATE else 2, editable=True, parent=self.grid,
+                    on_return=self._move_to_next_cell,
+                ),
+            )
 
         self.grid.setStyleSheet(
             "QTableWidget { background: white; border: 1px solid #E5E7EB; }"
@@ -269,6 +307,13 @@ class JournalVoucherFormView(QWidget):
         # (راجع توثيق money.py) قبل ما تدخل بأي حساب لاحق بالواجهة
         self.default_exchange_rate_spin.setValue(float(rate_(e.exchange_rate)))
 
+        # صفوف هذا القيد المُعاد تحميله تبدأ بدون أي تعديل يدوي مسجَّل — تُعاد
+        # علامة "معدَّل يدوياً" أدناه فقط للأسطر التي فعلاً لها عملة/سعر صرف
+        # خاصان محفوظان (line_currency_code/line_exchange_rate)، تمييزاً عن
+        # الأسطر التي ورثت عملة القيد الافتراضية وقت الحفظ.
+        self._manual_currency_rows = set()
+        self._manual_rate_rows = set()
+
         self.grid.blockSignals(True)
         self._close_current_editor()
         self.grid.setRowCount(0)
@@ -276,12 +321,20 @@ class JournalVoucherFormView(QWidget):
             row = self.grid.rowCount()
             self.grid.insertRow(row)
             self.grid.setItem(row, COL_CODE, QTableWidgetItem(line.account.code))
-            self.grid.setItem(row, COL_ACCOUNT, QTableWidgetItem(line.account.name_ar))
+            self.grid.setItem(row, COL_ACCOUNT, self._readonly_item(line.account.name_ar))
             self.grid.setItem(row, COL_DESC, QTableWidgetItem(""))
-            self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(line.line_currency_code or ""))
-            self.grid.setItem(row, COL_RATE, QTableWidgetItem(
-                str(rate_(line.line_exchange_rate)) if line.line_exchange_rate else ""
-            ))
+            # عملة/سعر خاصان بهذا السطر لو محفوظان صراحة، وإلا نعرض عملة/سعر
+            # القيد الافتراضيَين الحاليَين بالرأس (نفس منطق سطر جديد تماماً).
+            if line.line_currency_code:
+                self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(line.line_currency_code))
+                self._manual_currency_rows.add(row)
+            else:
+                self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(self.default_currency_combo.currentText()))
+            if line.line_exchange_rate:
+                self.grid.setItem(row, COL_RATE, QTableWidgetItem(str(rate_(line.line_exchange_rate))))
+                self._manual_rate_rows.add(row)
+            else:
+                self.grid.setItem(row, COL_RATE, QTableWidgetItem(str(self._default_rate())))
             self.grid.setItem(row, COL_DEBIT, QTableWidgetItem(str(line.debit) if line.debit else ""))
             self.grid.setItem(row, COL_CREDIT, QTableWidgetItem(str(line.credit) if line.credit else ""))
             self.grid.setItem(row, COL_DEBIT_BASE, QTableWidgetItem(str(line.debit_base) if line.debit else ""))
@@ -323,11 +376,23 @@ class JournalVoucherFormView(QWidget):
 
     # -- الشبكة --------------------------------------------------------------
     def _add_empty_row(self) -> None:
+        """يبني صفاً فارغاً جديداً، ويعبّئ عمودي العملة/سعر الصرف بالقيمة
+        الافتراضية بالرأس مباشرة (بدل تركهما فارغين) — حتى لا يُضطر المحاسب
+        لفتح ComboBox العملة يدوياً بكل سطر. التعبئة تتم بـblockSignals حتى
+        لا تُسجَّل كـ"تعديل يدوي" (راجع _manual_currency_rows/_manual_rate_rows)."""
         self._close_current_editor()
         row = self.grid.rowCount()
         self.grid.insertRow(row)
+        # راجع تعليق _set_cell_silently عن سبب استعادة الحالة السابقة بدل
+        # تثبيت False — هذه الدالة تُستدعى أحياناً من داخل _load_entry
+        # وهو مُغلَق الإشارات أصلاً بحلقة كاملة.
+        was_blocked = self.grid.blockSignals(True)
         for col in range(len(COLUMNS)):
             self.grid.setItem(row, col, QTableWidgetItem(""))
+        self.grid.setItem(row, COL_ACCOUNT, self._readonly_item(""))
+        self.grid.setItem(row, COL_CURRENCY, QTableWidgetItem(self.default_currency_combo.currentText()))
+        self.grid.setItem(row, COL_RATE, QTableWidgetItem(str(self._default_rate())))
+        self.grid.blockSignals(was_blocked)
 
     def _row_has_data(self, row: int) -> bool:
         code_item = self.grid.item(row, COL_CODE)
@@ -338,12 +403,48 @@ class JournalVoucherFormView(QWidget):
         return (item.text() if item else "").replace(",", "").strip()
 
     def _set_cell_silently(self, row: int, col: int, text: str) -> None:
-        self.grid.blockSignals(True)
-        self.grid.setItem(row, col, QTableWidgetItem(text))
-        self.grid.blockSignals(False)
+        # blockSignals() يُرجع الحالة السابقة — نستعيدها بدل تثبيت False
+        # دائماً، لأن هذه الدالة قد تُستدعى من داخل سياق آخر مُغلَق الإشارات
+        # أصلاً (مثل _load_entry أو _add_empty_row)، وQObject.blockSignals
+        # ليست عدّاداً قابلاً للتداخل (nesting) — تثبيت False بلا شرط كان
+        # سيُعيد فتح الإشارات قبل الأوان وسط تلك السياقات.
+        was_blocked = self.grid.blockSignals(True)
+        item = self._readonly_item(text) if col == COL_ACCOUNT else QTableWidgetItem(text)
+        self.grid.setItem(row, col, item)
+        self.grid.blockSignals(was_blocked)
 
     def _default_rate(self) -> Decimal:
         return rate_(Decimal(str(self.default_exchange_rate_spin.value())))
+
+    def _on_default_currency_changed(self, text: str) -> None:
+        """تغيّر عملة الرأس الافتراضية → تُطبَّق فوراً على كل الأسطر التي لم
+        يخصّها المحاسب بعملة مختلفة يدوياً. لا تُطبَّق هذه القيمة كـ"عملة
+        القيد الوحيدة"، فقط كافتراضي — بالضبط كما نوقش: تغيير العملة بالرأس
+        لا يعني أن السند كله أصبح بهذه العملة."""
+        if not hasattr(self, "grid"):
+            return
+        for row in range(self.grid.rowCount()):
+            if row in self._manual_currency_rows:
+                continue
+            self._set_cell_silently(row, COL_CURRENCY, text)
+
+    def _on_default_rate_changed(self, _value: float) -> None:
+        """نفس مبدأ _on_default_currency_changed لسعر الصرف: Default قابل
+        للتغيير الحر من المحاسب بأي سطر (راجع نقاش سعر الصرف — لاحقاً سيأتي
+        هذا الافتراضي من إعدادات أسعار الصرف حسب العملة والتاريخ، وليس الآن
+        من هذا الحقل فقط، لكن يبقى قابلاً للتعديل اليدوي دوماً بنفس المبدأ)."""
+        if not hasattr(self, "grid"):
+            return
+        rate_text = str(self._default_rate())
+        for row in range(self.grid.rowCount()):
+            if row in self._manual_rate_rows:
+                continue
+            self._set_cell_silently(row, COL_RATE, rate_text)
+            if self._cell_text(row, COL_DEBIT):
+                self._derive_base_from_amount_and_rate(row, COL_DEBIT, COL_DEBIT_BASE)
+            if self._cell_text(row, COL_CREDIT):
+                self._derive_base_from_amount_and_rate(row, COL_CREDIT, COL_CREDIT_BASE)
+        self._recalculate_totals()
 
     def _derive_base_from_amount_and_rate(self, row: int, amount_col: int, base_col: int) -> None:
         """المبلغ أو سعر الصرف تغيّر → نعيد حساب المعادل الأساسي منهما."""
@@ -379,6 +480,20 @@ class JournalVoucherFormView(QWidget):
     def _on_cell_changed(self, changed_item: QTableWidgetItem) -> None:
         row, col = changed_item.row(), changed_item.column()
 
+        # هذه الدالة لا تُستدعى إطلاقاً للتغييرات المُجراة عبر
+        # _set_cell_silently (لأنها تُغلِق الإشارات دائماً) — أي وصول
+        # لهذه النقطة بعمود العملة/السعر/المعادل يعني المحاسب هو من غيّره
+        # مباشرة، فنسجّله كـ"تعديل يدوي" لا يُكتَب فوقه لاحقاً عند تغيّر
+        # الافتراضي بالرأس (راجع _on_default_currency_changed/_on_default_rate_changed).
+        if col == COL_CURRENCY:
+            self._manual_currency_rows.add(row)
+        elif col == COL_RATE:
+            self._manual_rate_rows.add(row)
+        elif col in (COL_DEBIT_BASE, COL_CREDIT_BASE) and changed_item.text().strip():
+            # تعديل المعادل الأساسي يدوياً يُنتج سعر صرف مُستنتَج (أدناه) —
+            # وهذا بحد ذاته اختيار يدوي لسعر الصرف، فيُسجَّل بنفس المجموعة.
+            self._manual_rate_rows.add(row)
+
         if col == COL_CODE:
             code = changed_item.text().strip()
             match = next((a for a in self._accounts_cache if a.code == code), None)
@@ -408,8 +523,16 @@ class JournalVoucherFormView(QWidget):
             self._derive_rate_from_amount_and_base(row, COL_CREDIT, COL_CREDIT_BASE)
 
         if row == self.grid.rowCount() - 1 and self._row_has_data(row):
-            self._close_current_editor()
-            self._add_empty_row()
+            # مؤجَّل عمداً لتشغيل بعد اكتمال دورة الحدث الحالية بالكامل —
+            # إضافة صف (insertRow) بشكل متزامن هنا، أثناء كوننا فعلياً داخل
+            # معالجة commitData لمحرِّر خلية لا يزال قيد الإغلاق (خصوصاً عبر
+            # مسار Enter الموحّد)، تزيح فهرسة كل الصفوف التالية قبل أن يُنهي
+            # كيوت ربط المحرِّر بخليته الأصلية — وهذا هو سبب تحذير الطرفية
+            # 'commitData called with an editor that does not belong to this
+            # view'. التأجيل بـQTimer.singleShot(0, ...) نمط قياسي بكيوت
+            # لتفادي هذا التعارض: يشغّل الدالة بعد أن يحرِّر Qt المحرِّر
+            # القديم بالكامل من طابور الأحداث، لا في منتصف معالجته.
+            QTimer.singleShot(0, self._add_empty_row)
 
         self._recalculate_totals()
 
@@ -446,6 +569,15 @@ class JournalVoucherFormView(QWidget):
         row = self.grid.currentRow()
         if row >= 0 and self.grid.rowCount() > 1:
             self.grid.removeRow(row)
+            # فهرسة الصفوف تحت الصف المحذوف تنزاح للأعلى بمقدار 1 — نطابق
+            # نفس الإزاحة بمجموعتَي "التعديل اليدوي" حتى لا تبقى مرتبطة
+            # بصفوف خاطئة بعد الحذف (راجع _on_default_currency_changed).
+            self._manual_currency_rows = {
+                r if r < row else r - 1 for r in self._manual_currency_rows if r != row
+            }
+            self._manual_rate_rows = {
+                r if r < row else r - 1 for r in self._manual_rate_rows if r != row
+            }
             self._recalculate_totals()
 
     # -- الحساب الحي -----------------------------------------------------

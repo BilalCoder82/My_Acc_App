@@ -1,21 +1,27 @@
 """
-Chart of Accounts View — دليل الحسابات (مُحسَّن v3)
-=====================================================
+Chart of Accounts View — دليل الحسابات (مُحسَّن v3 + بطاقة الحساب)
+=====================================================================
 عرض شجري بتنسيق احترافي: ألوان حسب نوع الحساب، محاذاة الأرصدة،
 بحث فوري مع تمييز النتائج.
-"""
+
+الشجرة هي المساحة الرئيسية فقط — لا لوحة تفاصيل ثابتة بجانبها. تفاصيل أي
+حساب (بطاقة الحساب) تظهر بنافذة منبثقة (QDialog) عند: نقر مزدوج، أو Enter
+(كلاهما يصلان تلقائياً عبر إشارة Qt القياسية itemActivated — لا حاجة لربط
+منفصل لكل منهما). زر [+ حساب] بالأعلى لحساب رئيسي جديد، ومفتاح Insert على
+حساب محدَّد بالشجرة لإنشاء حساب فرعي له مباشرة (الأب مُعبَّأ تلقائياً)."""
 
 from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QLineEdit, QLabel, QHeaderView
+    QLineEdit, QLabel, QHeaderView, QPushButton
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QFont
 from sqlalchemy.orm import Session
 
 from app.models import Account, AccountType
 from app.reports.rollup import get_root_accounts, get_account_balance
+from app.ui.accounting.account_card_dialog import AccountCardDialog
 
 TYPE_COLORS = {
     AccountType.ASSET: ("#1E40AF", "#DBEAFE"),
@@ -52,6 +58,12 @@ class ChartOfAccountsView(QWidget):
         title.setStyleSheet("color: #111827;")
         header.addWidget(title)
         header.addStretch()
+        add_btn = QPushButton("+ حساب")
+        add_btn.setStyleSheet(
+            "background: #2563EB; color: white; padding: 8px 18px; border-radius: 6px; font-weight: bold;"
+        )
+        add_btn.clicked.connect(self._add_account)
+        header.addWidget(add_btn)
         layout.addLayout(header)
 
         self.search_box = QLineEdit()
@@ -86,7 +98,39 @@ class ChartOfAccountsView(QWidget):
         )
         layout.addWidget(self.tree)
 
+        # itemActivated إشارة Qt قياسية تُطلَق تلقائياً على نقر مزدوج وعلى
+        # Enter/Return معاً — لا حاجة لربط منفصل لكل مسار (راجع تعليق أعلى الملف).
+        self.tree.itemActivated.connect(self._open_account_card)
+        # Insert لإنشاء حساب فرعي سريع — لا إشارة Qt جاهزة لهذا، فنعترض
+        # المفتاح مباشرة على الشجرة (نفس أسلوب eventFilter المستخدم بسند القيد).
+        self.tree.installEventFilter(self)
+
         self._reload()
+
+    def eventFilter(self, obj, event):
+        if obj is self.tree and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Insert:
+            self._add_account(default_parent_item=self.tree.currentItem())
+            return True
+        return super().eventFilter(obj, event)
+
+    # -- بطاقة الحساب ----------------------------------------------------------
+    def _account_from_item(self, item: QTreeWidgetItem) -> Account | None:
+        account_id = item.data(0, Qt.UserRole)
+        return self.session.get(Account, account_id) if account_id else None
+
+    def _open_account_card(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        account = self._account_from_item(item)
+        if account is None:
+            return
+        dlg = AccountCardDialog(self.session, account=account, parent=self)
+        if dlg.exec():
+            self._reload()
+
+    def _add_account(self, default_parent_item: QTreeWidgetItem | None = None) -> None:
+        default_parent = self._account_from_item(default_parent_item) if default_parent_item else None
+        dlg = AccountCardDialog(self.session, account=None, default_parent=default_parent, parent=self)
+        if dlg.exec():
+            self._reload()
 
     def _reload(self) -> None:
         self.tree.clear()
@@ -105,6 +149,10 @@ class ChartOfAccountsView(QWidget):
             type_label,
             str(balance)
         ])
+        node.setData(0, Qt.UserRole, account.id)
+        if not account.is_active:
+            node.setForeground(0, Qt.GlobalColor.gray)
+            node.setForeground(1, Qt.GlobalColor.gray)
         node.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)
         node.setForeground(2, Qt.GlobalColor.darkGray)
         node.setToolTip(2, f"نوع الحساب: {type_label}")
