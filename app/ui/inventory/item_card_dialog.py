@@ -196,11 +196,19 @@ class ItemCardDialog(QDialog):
         self.cost_method_combo.setLayoutDirection(Qt.RightToLeft)
         for cm in CostMethod:
             self.cost_method_combo.addItem(COST_METHOD_LABELS[cm], cm)
-        self.cost_method_combo.setCurrentIndex(0)  # Average فقط — راجع item_edit.py
-        # FIFO مُعطَّل بالواجهة عمداً (index 1) — غير مُنفَّذ بمحرّك الترحيل
-        self.cost_method_combo.model().item(1).setEnabled(False)
-        if item and item.cost_method == CostMethod.FIFO:
-            self.cost_method_combo.setCurrentIndex(1)
+            # FIFO مُعطَّل بالواجهة عمداً — غير مُنفَّذ بمحرّك الترحيل (item_edit.py
+            # يرفضه أصلاً بالخدمة). **بالبيانات (findData) لا بفهرس ثابت** — ترتيب
+            # ظهور القيم بـCostMethod (models.py) هو FIFO ثم AVERAGE، وليس العكس؛
+            # فهرس ثابت هنا كان بالضبط سبب خطأ سابق (راجع WORKFLOW.md §28): AVERAGE
+            # ظهرت مُعطَّلة وFIFO مُختارة افتراضياً — عكس المطلوب تماماً، وكانت تمنع
+            # حفظ أي مادة جديدة لأن FIFO هي القيمة الوحيدة القابلة للاختيار فعلياً.
+            if cm != CostMethod.AVERAGE:
+                self.cost_method_combo.model().item(self.cost_method_combo.count() - 1).setEnabled(False)
+        default_cm = item.cost_method if item else CostMethod.AVERAGE
+        selected_index = self.cost_method_combo.findData(default_cm)
+        if selected_index < 0:  # قيمة غير متوقَّعة بالبيانات القديمة — لا نفرض Average بصمت
+            selected_index = self.cost_method_combo.findData(CostMethod.AVERAGE)
+        self.cost_method_combo.setCurrentIndex(selected_index)
         settings_grid.addWidget(self.cost_method_combo, 1, 0)
         layout.addLayout(settings_grid)
 
