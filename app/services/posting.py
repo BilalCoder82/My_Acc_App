@@ -200,7 +200,16 @@ def post_purchase_invoice(session: Session, invoice: Invoice, is_cash: bool = Tr
         )
 
         q = D(line_total.line.quantity)
-        unit_cost_after_discount = (line_total.net_after_all_discounts / q) if q else Decimal("0")
+        # **حرج**: تكلفة الوحدة المخزَّنة بـInventoryMovement يجب أن تكون
+        # دائماً بالعملة الأساسية — نفس مبدأ WORKFLOW.md §23 ("تكلفة المخزون
+        # تُسجَّل بالعملة الأساسية وقت الاقتناء"). net_after_all_discounts
+        # بالأعلى بعملة الفاتورة الأصلية (USD مثلاً) بلا أي تحويل — قبل هذا
+        # الإصلاح كانت تُخزَّن كما هي دون ضرب بسعر الصرف، فيختلط دولار خام
+        # مع ليرة سورية بالمتوسط المرجّح لأي مادة تُشترى أحياناً بعملة أساسية
+        # وأحياناً بعملة أجنبية — خطأ حقيقي انكشف فقط باختبار End-to-End
+        # بفاتورة شراء دولارية فعلية، راجع WORKFLOW.md §29.
+        net_in_base = money(line_total.net_after_all_discounts * D(invoice.exchange_rate))
+        unit_cost_after_discount = (net_in_base / q) if q else Decimal("0")
         session.add(InventoryMovement(
             item_id=item.id, warehouse_id=warehouse_id, direction=MovementDirection.IN,
             quantity=line_total.line.quantity, unit_cost=unit_cost_after_discount,
