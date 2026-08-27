@@ -92,7 +92,7 @@ class MainWindow(QMainWindow):
         self._add_menu_item(purchases_menu, LABELS["purchase_returns"], self._open_purchase_return_list)
 
         inventory_menu = menu_bar.addMenu(LABELS["inventory"])
-        self._add_menu_item(inventory_menu, LABELS["items"], self._open_not_implemented)
+        self._add_menu_item(inventory_menu, LABELS["items"], self._open_items)
         self._add_menu_item(inventory_menu, LABELS["warehouses"], self._open_not_implemented)
         self._add_menu_item(inventory_menu, LABELS["stock_transfer"], self._open_not_implemented)
 
@@ -169,6 +169,10 @@ class MainWindow(QMainWindow):
     def _open_chart_of_accounts(self) -> None:
         from app.ui.accounting.chart_of_accounts_view import ChartOfAccountsView
         self._open_window(LABELS["coa"], ChartOfAccountsView(self.session))
+
+    def _open_items(self) -> None:
+        from app.ui.inventory.item_list_view import ItemListView
+        self._open_window(LABELS["items"], ItemListView(self.session))
 
     def _open_journal_voucher_list(self) -> None:
         from app.ui.accounting.journal_voucher_list import JournalVoucherListView

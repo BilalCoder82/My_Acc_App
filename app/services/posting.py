@@ -26,6 +26,7 @@ from app.models import (
 from app.services.parties import get_or_create_party_account
 from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_validation import validate_invoice_for_posting, InvoiceValidationError
+from app.services.item_queries import get_item_stock_summary
 from app.services.money import D, money
 
 
@@ -71,26 +72,11 @@ def _jline(account_id: int, debit: Decimal, credit: Decimal, exchange_rate) -> J
 
 
 def _average_cost(session: Session, item_id: int) -> Decimal:
-    """كلفة الوحدة الحالية = آخر متوسط مرجّح محفوظ من حركات الدخول (كل المستودعات)."""
-    movements = session.execute(
-        select(InventoryMovement)
-        .where(InventoryMovement.item_id == item_id)
-        .order_by(InventoryMovement.movement_date)
-    ).scalars().all()
-
-    total_qty, total_cost = Decimal("0"), Decimal("0")
-    for m in movements:
-        if m.direction == MovementDirection.IN:
-            total_qty += D(m.quantity)
-            total_cost += D(m.quantity) * D(m.unit_cost)
-        else:
-            avg = (total_cost / total_qty) if total_qty else Decimal("0")
-            total_qty -= D(m.quantity)
-            total_cost -= D(m.quantity) * avg
-
-    if total_qty <= 0:
-        return Decimal("0")
-    return total_cost / total_qty
+    """كلفة الوحدة الحالية = آخر متوسط مرجّح محفوظ من حركات الدخول (كل المستودعات).
+    مصدر الحساب الفعلي الآن app/services/item_queries.py (get_item_stock_summary)
+    — نفس الخوارزمية بالضبط، لكن بمكان واحد فقط بدل نسختين قد تنحرفان عن
+    بعضهما لاحقاً (راجع WORKFLOW.md §25)."""
+    return get_item_stock_summary(session, item_id).average_cost
 
 
 def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True) -> JournalEntry:
@@ -106,7 +92,10 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
     else:
         party_account = get_or_create_party_account(session, invoice.party_name, is_customer=True)
         cash_or_ar = party_account.id
-    sales_acc = _get_setting(session, "default_sales_account_id")
+    # حساب مبيعات المادة (Item.sales_account_id) هو المصدر الأول الآن —
+    # الإعداد العام default_sales_account_id احتياطي فقط لمادة لم تُحدَّد
+    # لها حساب مبيعات خاص. راجع WORKFLOW.md §27 لسبب هذا التغيير.
+    default_sales_acc = _get_setting(session, "default_sales_account_id")
     tax_acc = _get_setting(session, "default_sales_tax_account_id")
     warehouse_id = _invoice_warehouse_id(session, invoice)
 
@@ -119,7 +108,15 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         status=JournalEntryStatus.POSTED,
     )
 
-    total_sales, total_tax, total_cogs = Decimal("0"), Decimal("0"), Decimal("0")
+    total_sales, total_tax = Decimal("0"), Decimal("0")
+    # مُجمَّعة بحساب المادة الفعلي — فاتورة بعدة مواد بحسابات مبيعات/مخزون/تكلفة
+    # مختلفة تُنتج سطر قيد منفصلاً لكل حساب مختلف فعلاً، لا سطراً واحداً
+    # بحسابات أول مادة فقط مطبَّقة على إجمالي كل السطور (كان هذا خطأً موجوداً
+    # فعلياً بالنسخة السابقة لكل فاتورة متعددة المواد بحسابات مختلفة — راجع
+    # WORKFLOW.md §27).
+    sales_credits: dict[int, Decimal] = {}
+    cogs_debits: dict[int, Decimal] = {}
+    inventory_credits: dict[int, Decimal] = {}
     totals = compute_invoice_totals(invoice)
 
     for line_total in totals.lines:
@@ -127,8 +124,13 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         total_sales += line_total.net_after_all_discounts
         total_tax += line_total.tax_amount
 
+        sales_acc_id = item.sales_account_id or default_sales_acc
+        sales_credits[sales_acc_id] = sales_credits.get(sales_acc_id, Decimal("0")) + line_total.net_after_all_discounts
+
         unit_cost = _average_cost(session, item.id)
-        total_cogs += money(unit_cost * D(line_total.line.quantity))
+        line_cogs = money(unit_cost * D(line_total.line.quantity))
+        cogs_debits[item.cogs_account_id] = cogs_debits.get(item.cogs_account_id, Decimal("0")) + line_cogs
+        inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cogs
 
         session.add(InventoryMovement(
             item_id=item.id, warehouse_id=warehouse_id, direction=MovementDirection.OUT,
@@ -136,16 +138,17 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
             movement_date=invoice.invoice_date, source_type="sales_invoice", source_id=invoice.id,
         ))
 
-    entry.lines = [
-        _jline(cash_or_ar, total_sales + total_tax, Decimal("0"), invoice.exchange_rate),
-        _jline(sales_acc, Decimal("0"), total_sales, invoice.exchange_rate),
-    ]
+    entry.lines = [_jline(cash_or_ar, total_sales + total_tax, Decimal("0"), invoice.exchange_rate)]
+    for acc_id, amount in sales_credits.items():
+        entry.lines.append(_jline(acc_id, Decimal("0"), amount, invoice.exchange_rate))
     if total_tax:
         entry.lines.append(_jline(tax_acc, Decimal("0"), total_tax, invoice.exchange_rate))
-    if total_cogs:
-        item0 = session.get(Item, invoice.lines[0].item_id)
-        entry.lines.append(_jline(item0.cogs_account_id, total_cogs, Decimal("0"), invoice.exchange_rate))
-        entry.lines.append(_jline(item0.inventory_account_id, Decimal("0"), total_cogs, invoice.exchange_rate))
+    for acc_id, amount in cogs_debits.items():
+        if amount:
+            entry.lines.append(_jline(acc_id, amount, Decimal("0"), invoice.exchange_rate))
+    for acc_id, amount in inventory_credits.items():
+        if amount:
+            entry.lines.append(_jline(acc_id, Decimal("0"), amount, invoice.exchange_rate))
 
     if not entry.is_balanced():
         raise PostingError("خطأ داخلي: القيد غير متوازن — لا يُرحّل")

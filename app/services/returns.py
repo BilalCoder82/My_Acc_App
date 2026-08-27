@@ -136,7 +136,7 @@ def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool =
     else:
         party_account = get_or_create_party_account(session, return_invoice.party_name, is_customer=True)
         cash_or_ar = party_account.id
-    sales_acc = _get_setting(session, "default_sales_account_id")
+    default_sales_acc = _get_setting(session, "default_sales_account_id")
     tax_acc = _get_setting(session, "default_sales_tax_account_id")
     warehouse_id = _invoice_warehouse_id(session, return_invoice)
 
@@ -151,15 +151,25 @@ def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool =
     )
 
     totals = compute_invoice_totals(return_invoice)
-    total_sales, total_tax, total_cost = Decimal("0"), Decimal("0"), Decimal("0")
+    total_sales, total_tax = Decimal("0"), Decimal("0")
+    # نفس تصحيح post_sales_invoice — مُجمَّعة بحساب كل مادة فعلياً، لا حسابات
+    # أول مادة مطبَّقة على إجمالي كل السطور (راجع WORKFLOW.md §27).
+    sales_debits: dict[int, Decimal] = {}
+    inventory_debits: dict[int, Decimal] = {}
+    cogs_credits: dict[int, Decimal] = {}
 
     for line_total in totals.lines:
         item = session.get(Item, line_total.line.item_id)
         total_sales += line_total.net_after_all_discounts
         total_tax += line_total.tax_amount
 
+        sales_acc_id = item.sales_account_id or default_sales_acc
+        sales_debits[sales_acc_id] = sales_debits.get(sales_acc_id, Decimal("0")) + line_total.net_after_all_discounts
+
         unit_cost = _return_unit_cost(session, item.id, original_invoice)
-        total_cost += money(unit_cost * D(line_total.line.quantity))
+        line_cost = money(unit_cost * D(line_total.line.quantity))
+        inventory_debits[item.inventory_account_id] = inventory_debits.get(item.inventory_account_id, Decimal("0")) + line_cost
+        cogs_credits[item.cogs_account_id] = cogs_credits.get(item.cogs_account_id, Decimal("0")) + line_cost
 
         # البضاعة ترجع للمخزون (IN)، عكس اتجاه البيع تماماً
         session.add(InventoryMovement(
@@ -170,16 +180,18 @@ def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool =
         ))
 
     # مدين: مبيعات + ضريبة (تخفيض الإيراد والضريبة) | دائن: الصندوق/العميل (استرداد)
-    entry.lines = [
-        _jline(sales_acc, total_sales, Decimal("0"), return_invoice.exchange_rate),
-        _jline(cash_or_ar, Decimal("0"), total_sales + total_tax, return_invoice.exchange_rate),
-    ]
+    entry.lines = []
+    for acc_id, amount in sales_debits.items():
+        entry.lines.append(_jline(acc_id, amount, Decimal("0"), return_invoice.exchange_rate))
+    entry.lines.append(_jline(cash_or_ar, Decimal("0"), total_sales + total_tax, return_invoice.exchange_rate))
     if total_tax:
         entry.lines.append(_jline(tax_acc, total_tax, Decimal("0"), return_invoice.exchange_rate))
-    if total_cost:
-        item0 = session.get(Item, return_invoice.lines[0].item_id)
-        entry.lines.append(_jline(item0.inventory_account_id, total_cost, Decimal("0"), return_invoice.exchange_rate))
-        entry.lines.append(_jline(item0.cogs_account_id, Decimal("0"), total_cost, return_invoice.exchange_rate))
+    for acc_id, amount in inventory_debits.items():
+        if amount:
+            entry.lines.append(_jline(acc_id, amount, Decimal("0"), return_invoice.exchange_rate))
+    for acc_id, amount in cogs_credits.items():
+        if amount:
+            entry.lines.append(_jline(acc_id, Decimal("0"), amount, return_invoice.exchange_rate))
 
     if not entry.is_balanced():
         raise PostingError("خطأ داخلي: قيد المرتجع غير متوازن — لا يُرحّل")
