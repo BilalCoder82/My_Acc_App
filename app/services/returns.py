@@ -29,7 +29,7 @@ from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_validation import validate_invoice_for_posting, InvoiceValidationError
 from app.services.money import D, money
 from app.services.posting import (
-    _get_setting, _next_ref_no, _jline, _average_cost, _invoice_warehouse_id, PostingError,
+    _get_setting, _next_ref_no, _jline, _jline_base, _average_cost, _invoice_warehouse_id, PostingError,
 )
 
 
@@ -188,10 +188,10 @@ def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool =
         entry.lines.append(_jline(tax_acc, total_tax, Decimal("0"), return_invoice.exchange_rate))
     for acc_id, amount in inventory_debits.items():
         if amount:
-            entry.lines.append(_jline(acc_id, amount, Decimal("0"), return_invoice.exchange_rate))
+            entry.lines.append(_jline_base(acc_id, amount, Decimal("0")))
     for acc_id, amount in cogs_credits.items():
         if amount:
-            entry.lines.append(_jline(acc_id, Decimal("0"), amount, return_invoice.exchange_rate))
+            entry.lines.append(_jline_base(acc_id, Decimal("0"), amount))
 
     if not entry.is_balanced():
         raise PostingError("خطأ داخلي: قيد المرتجع غير متوازن — لا يُرحّل")
@@ -236,17 +236,33 @@ def post_purchase_return(session: Session, return_invoice: Invoice, is_cash: boo
     )
 
     totals = compute_invoice_totals(return_invoice)
-    total_purchase, total_tax = Decimal("0"), Decimal("0")
+    total_tax = Decimal("0")
+    # **حرج**: قيمة البضاعة المُعادة للمورد يجب أن تُحسَب من الكلفة
+    # التاريخية (`_return_unit_cost` — نفس القيمة المُخزَّنة بـInventoryMovement
+    # تماماً)، لا من سعر/عملة سطر المرتجع نفسه. قبل هذا الإصلاح كان القيد
+    # المحاسبي (inventory_credits/cash_or_ap) يُحسَب من
+    # `line_total.net_after_all_discounts` (سعر وسعر صرف المرتجع كما أُدخِلا
+    # بسطره)، بينما InventoryMovement.unit_cost يُحسَب من `_return_unit_cost`
+    # (الكلفة التاريخية الصحيحة) — **مصدران مختلفان لنفس الرقم بنفس العملية**.
+    # طالما تطابق سعر/عملة سطر المرتجع مع الفاتورة الأصلية بالصدفة (كل
+    # اختبار سابق فعل ذلك)، لا يظهر الفرق؛ بمجرد اختلاف سعر الصرف أو السعر
+    # على سطر المرتجع (حتى لو خطأ إدخال بسيط)، يختلف رقم دفتر الأستاذ عن
+    # رقم حركة المخزون لنفس البضاعة بنفس القيد — تناقض بيانات حقيقي، انكشف
+    # فقط باختبار تعمَّد اختلاف سعر الصرف بالمرتجع عن الفاتورة الأصلية.
+    # راجع WORKFLOW.md §30. نفس النمط المستخدَم أصلاً وبشكل صحيح
+    # بـpost_sales_return (`unit_cost = _return_unit_cost(...)`) الآن يُطبَّق
+    # هنا حرفياً لضمان مصدر واحد فقط لقيمة البضاعة بكل مرتجع.
+    total_cost = Decimal("0")
     inventory_credits: dict[int, Decimal] = {}
 
     for line_total in totals.lines:
         item = session.get(Item, line_total.line.item_id)
-        total_purchase += line_total.net_after_all_discounts
         total_tax += line_total.tax_amount
-        inventory_credits[item.inventory_account_id] = (
-            inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_total.net_after_all_discounts
-        )
+
         unit_cost = _return_unit_cost(session, item.id, original_invoice)
+        line_cost = money(unit_cost * D(line_total.line.quantity))
+        total_cost += line_cost
+        inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cost
 
         # البضاعة تخرج من المخزون (OUT) — ترجع للمورد
         session.add(InventoryMovement(
@@ -257,10 +273,17 @@ def post_purchase_return(session: Session, return_invoice: Invoice, is_cash: boo
         ))
 
     # مدين: المورد/الصندوق (تخفيض الذمم أو استرداد نقدي) | دائن: المخزون + الضريبة
-    entry.lines = [_jline(cash_or_ap, total_purchase + total_tax, Decimal("0"), return_invoice.exchange_rate)]
+    # ملاحظة: سطر cash_or_ap مُقسَّم عمداً لسطرين منفصلين لا سطر واحد مُجمَّع —
+    # total_cost مبلغ محوَّل للعملة الأساسية مسبقاً (راجع تعليق _jline_base
+    # أعلاه)، بينما total_tax لا يزال بعملة المستند الأصلية ويحتاج تحويلاً
+    # فعلياً عبر exchange_rate؛ دمجهما بسطر واحد بمعدّل تحويل واحد كان
+    # سيُصحِّح أحدهما بينما يُفسِد الآخر حتماً.
+    entry.lines = [_jline_base(cash_or_ap, total_cost, Decimal("0"))]
     for inv_acc_id, amount in inventory_credits.items():
-        entry.lines.append(_jline(inv_acc_id, Decimal("0"), amount, return_invoice.exchange_rate))
+        if amount:
+            entry.lines.append(_jline_base(inv_acc_id, Decimal("0"), amount))
     if total_tax:
+        entry.lines.append(_jline(cash_or_ap, total_tax, Decimal("0"), return_invoice.exchange_rate))
         entry.lines.append(_jline(tax_acc, Decimal("0"), total_tax, return_invoice.exchange_rate))
 
     if not entry.is_balanced():

@@ -63,12 +63,29 @@ def _invoice_warehouse_id(session: Session, invoice: Invoice) -> int:
 
 
 def _jline(account_id: int, debit: Decimal, credit: Decimal, exchange_rate) -> JournalLine:
-    """ينشئ سطر قيد مع حساب القيمة بالعملة الأساسية تلقائياً."""
+    """ينشئ سطر قيد مع حساب القيمة بالعملة الأساسية تلقائياً. debit/credit هنا
+    دائماً بعملة المستند الأصلية (الفاتورة/سند القيد) — يُحوَّلان معاً بضربهما
+    بـexchange_rate. لا تستخدمها لمبلغ محوَّل للعملة الأساسية مسبقاً؛ استخدم
+    _jline_base بدلاً منها (راجع تعليقها لسبب وجود الاثنتين)."""
     d, c, rate = money(debit), money(credit), D(exchange_rate)
     return JournalLine(
         account_id=account_id, debit=d, credit=c,
         debit_base=money(d * rate), credit_base=money(c * rate),
     )
+
+
+def _jline_base(account_id: int, debit_base: Decimal, credit_base: Decimal) -> JournalLine:
+    """**حرج**: لسطر قيمته مُحوَّلة للعملة الأساسية مسبقاً بالفعل — تحديداً
+    COGS وحركات المخزون (`_average_cost`/`_return_unit_cost`)، لأن كلاهما
+    يقرآن مباشرة من InventoryMovement.unit_cost المخزَّن بالعملة الأساسية
+    دائماً (راجع WORKFLOW.md §29). هذا المبلغ **لا علاقة له بعملة الفاتورة
+    أو سعر صرفها إطلاقاً** — تكلفة المادة مستقلة تماماً عن عملة عملية
+    البيع/الشراء الحالية. تمرير هذا المبلغ عبر _jline مع exchange_rate
+    الفاتورة كان يُحوِّله **مرتين** (خطأ حقيقي خطير — راجع WORKFLOW.md §30:
+    مبلغ 1,200,000 كان يتحوّل بالخطأ إلى 21,600,000,000 بفاتورة USD).
+    debit == debit_base دائماً هنا (لا "عملة أصلية" منفصلة ذات معنى للتكلفة)."""
+    d, c = money(debit_base), money(credit_base)
+    return JournalLine(account_id=account_id, debit=d, credit=c, debit_base=d, credit_base=c)
 
 
 def _average_cost(session: Session, item_id: int) -> Decimal:
@@ -145,10 +162,10 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         entry.lines.append(_jline(tax_acc, Decimal("0"), total_tax, invoice.exchange_rate))
     for acc_id, amount in cogs_debits.items():
         if amount:
-            entry.lines.append(_jline(acc_id, amount, Decimal("0"), invoice.exchange_rate))
+            entry.lines.append(_jline_base(acc_id, amount, Decimal("0")))
     for acc_id, amount in inventory_credits.items():
         if amount:
-            entry.lines.append(_jline(acc_id, Decimal("0"), amount, invoice.exchange_rate))
+            entry.lines.append(_jline_base(acc_id, Decimal("0"), amount))
 
     if not entry.is_balanced():
         raise PostingError("خطأ داخلي: القيد غير متوازن — لا يُرحّل")

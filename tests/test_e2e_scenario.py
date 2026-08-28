@@ -18,6 +18,7 @@ import os, sys, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
 from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -303,11 +304,15 @@ inv_b_line8 = entry8_lines.get(inv_b.id)
 # لكن الأصح: الكلفة المسجَّلة بحركة الشراء الأصلية لكل وحدة = net_in_base / q = 3,000,000/20 = 150,000 SYP/وحدة
 purchase_unit_cost_b = D("3000000.00") / D("20")
 expected_return_value_b = money(D("10") * purchase_unit_cost_b)
+assert inv_b_line8[0:2] == (D("0.00"), expected_return_value_b), inv_b_line8
 assert inv_b_line8[2:4] == (D("0.00"), expected_return_value_b), (inv_b_line8, expected_return_value_b)
-assert supplier_line8[0:2] == (D("100.00"), D("0.00")), supplier_line8  # 10 وحدة × 10 USD = 100 USD خام
+# بعد إصلاح §30: سطر المورد لهذا الجزء (تكلفة تاريخية بحتة، بلا ضريبة هنا)
+# مُقيَّم بالعملة الأساسية مباشرة عبر _jline_base — لا حقل "عملة أصلية" منفصل
+# ذو معنى لمبلغ التكلفة نفسه (راجع WORKFLOW.md §30 لسبب هذا التصميم تحديداً)
+assert supplier_line8[0:2] == (expected_return_value_b, D("0.00")), supplier_line8
 assert supplier_line8[2:4] == (expected_return_value_b, D("0.00")), supplier_line8
 print(f"مرتجع شراء صحيح: كلفة الوحدة تُقرأ من الحركة الأصلية للفاتورة USD ({purchase_unit_cost_b} SYP/وحدة بالأساسية)، "
-      f"إجمالي {expected_return_value_b} SYP مقابل 100 USD خام")
+      f"إجمالي {expected_return_value_b} SYP — مُقيَّم بالعملة الأساسية مباشرة بلا أي تحويل إضافي بسعر صرف المرتجع")
 
 print("ALL CHECKS UP TO STAGE 8 PASSED")
 
