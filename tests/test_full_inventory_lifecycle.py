@@ -70,13 +70,22 @@ class InventoryLedgerOracle:
         self.value += qty * unit_cost_base
 
     def issue(self, qty: D_) -> D_:
-        """أي خروج من المخزون بالمتوسط الحالي: بيع، أو مرتجع شراء."""
+        """أي خروج بالمتوسط الحالي: بيع، أو مرتجع شراء **حر غير مربوط**
+        بفاتورة أصلية (الحالة الوحيدة التي يستخدم فيها المتوسط فعلاً)."""
         cost = self.avg_cost
         removed_value = qty * cost
         self.qty -= qty
         self.value -= removed_value
         self.cumulative_cogs += removed_value
         return cost
+
+    def return_purchase_at_historical_cost(self, qty: D_, historical_unit_cost: D_) -> None:
+        """مرتجع شراء **مربوط بفاتورة أصلية**: التكلفة تُقرأ من حركة
+        المخزون الأصلية تحديداً (وليس المتوسط الحالي وقت الإرجاع) —
+        بالضبط كما يفعل app/services/returns.py فعلياً لهذه الحالة.
+        لا يمس COGS إطلاقاً (مرتجع الشراء لا يمر بحساب تكلفة المبيعات)."""
+        self.qty -= qty
+        self.value -= qty * historical_unit_cost
 
     def snapshot(self, label: str) -> None:
         stage_log.append((label, self.qty, round(self.avg_cost, 2), round(self.value, 2), round(self.cumulative_cogs, 2)))
@@ -188,7 +197,7 @@ pret1 = Invoice(invoice_no="LC-PR1", kind=InvoiceKind.PURCHASE_RETURN, party_nam
                  original_invoice_id=p3.id)
 pret1.lines = [InvoiceLine(item_id=item.id, quantity=D_("15"), unit_price=D_("12000"))]
 s.add(pret1); s.commit(); post_purchase_return(s, pret1, is_cash=True); s.commit()
-oracle.issue(D_("15"))  # مرتجع الشراء يخرج بالمتوسط الحالي وقت الإرجاع
+oracle.return_purchase_at_historical_cost(D_("15"), D_("12000"))  # تكلفة p3 الأصلية تحديداً، لا المتوسط الحالي
 verify_against_ledger(s, item, oracle, coa["inventory"].id, coa["cogs"].id, "6) بعد مرتجع الشراء (الرصيد النهائي)")
 
 print("\nجدول المراحل:")
@@ -258,7 +267,7 @@ p_seq_ret = Invoice(invoice_no="SQ-PR1", kind=InvoiceKind.PURCHASE_RETURN, party
                      original_invoice_id=p_seq.id)
 p_seq_ret.lines = [InvoiceLine(item_id=item_sq.id, quantity=D_("20"), unit_price=D_("4000"))]
 s_seq.add(p_seq_ret); s_seq.commit(); post_purchase_return(s_seq, p_seq_ret, is_cash=True); s_seq.commit()
-oracle_seq.issue(D_("20"))
+oracle_seq.return_purchase_at_historical_cost(D_("20"), D_("4000"))  # تكلفة p_seq الأصلية تحديداً
 
 expected_final_qty = D_("100") - D_("40") + D_("10") - D_("20")  # = 50
 summary_seq = get_item_stock_summary(s_seq, item_sq.id)

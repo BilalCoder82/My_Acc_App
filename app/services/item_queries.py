@@ -32,9 +32,15 @@ class ItemStockSummary:
 
 def get_item_stock_summary(session: Session, item_id: int) -> ItemStockSummary:
     """الكمية الحالية ومتوسط التكلفة عبر كل المستودعات (مستودع افتراضي واحد
-    فعلياً حالياً — راجع get_default_warehouse بـposting.py). نفس خوارزمية
-    Average Cost المرجّح المستخدمة وقت الترحيل تماماً، بدون أي تقريب إضافي
-    هنا يخالف ما استُخدم فعلياً بالقيود المرحّلة."""
+    فعلياً حالياً — راجع get_default_warehouse بـposting.py).
+
+    قاعدة محاسبية أساسية (WORKFLOW.md §39): كل حركة *خروج* تُقيَّم بتكلفتها
+    الخاصة المخزَّنة فعلياً على الحركة نفسها (movement.unit_cost) — لا
+    بإعادة حساب متوسط جديد مستقل عند إعادة البناء. الحركة المرحّلة تمثّل
+    حقيقة تاريخية ثابتة، ولا يجوز "تسعيرها بأثر رجعي". هذا يضمن أن هذه
+    الدالة تنتج نفس القيمة تماماً التي استُخدمت فعلياً وقت الترحيل
+    (بما فيها حالة مرتجع شراء مرتبط بفاتورة أصلية، حيث unit_cost تاريخي
+    يختلف عمداً عن المتوسط الحالي وقت الإرجاع)."""
     movements = session.execute(
         select(InventoryMovement)
         .where(InventoryMovement.item_id == item_id)
@@ -47,9 +53,12 @@ def get_item_stock_summary(session: Session, item_id: int) -> ItemStockSummary:
             total_qty += D(m.quantity)
             total_cost += D(m.quantity) * D(m.unit_cost)
         else:
-            avg = (total_cost / total_qty) if total_qty else Decimal("0")
+            # الإصلاح (WORKFLOW.md §39.1): نستخدم unit_cost المخزَّن على
+            # حركة الخروج نفسها، لا متوسطاً مُعاد حسابه هنا. القيمة السابقة
+            # كانت تتجاهل unit_cost التاريخي للحركة، وتفترض أن كل خروج
+            # حدث بالمتوسط الحالي — خطأ في حالة مرتجع الشراء المرتبط تحديداً.
             total_qty -= D(m.quantity)
-            total_cost -= D(m.quantity) * avg
+            total_cost -= D(m.quantity) * D(m.unit_cost)
 
     if total_qty <= 0:
         return ItemStockSummary(quantity=total_qty, average_cost=Decimal("0"), inventory_value=Decimal("0"))
