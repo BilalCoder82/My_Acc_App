@@ -1,12 +1,12 @@
 """
 tests/run_gate.py
 ====================
-نقطة التشغيل الفعلية للبوابة (§31 بـWORKFLOW.md) — يجمع:
+نقطة التشغيل الفعلية للبوابة (§31، §33 بـWORKFLOW.md) — يجمع:
   1) fuzz+oracle (200 سيناريو شراء عشوائي)
-  2) Regression الكامل الحقيقي (تشغيل فعلي للملفات الثلاث كسكربتات،
-     لا محاكاة) — كل ملف يُشغَّل كعملية منفصلة، exit code=0 يعني نجاح.
-  3) استبعاد test_migration_safety.py صراحةً كـKnown Failure موثَّق،
-     لا حذفاً صامتاً (راجع WORKFLOW.md §31.5).
+  2) Regression الكامل الحقيقي (تشغيل الملفات كسكربتات فعلية، لا محاكاة)
+     — يشمل الآن اختبارات Alembic (تكامل معزول + مسار التطبيق الحقيقي +
+     migration safety المُعاد كتابته بالكامل — راجع §33.5، لم يعد Known
+     Failure دائماً بعد استبداله).
 
 الاستخدام: `python3 tests/run_gate.py`
 النتيجة: reports_out/fuzz_report.md + .json، وexit code = 0 فقط إذا
@@ -28,15 +28,16 @@ REGRESSION_FILES = [
     "tests/test_accounting_edge_cases.py",
     "tests/test_e2e_scenario.py",
     "tests/test_per_item_account_posting.py",
+    "tests/test_alembic_integration.py",
+    "tests/test_app_path_after_alembic.py",
+    "tests/test_migration_safety.py",
 ]
 
-KNOWN_FAILURES = [
-    "tests/test_migration_safety.py: مكسور مسبقاً (بمعزل عن أي إصلاح بهذه "
-    "الجلسة) — MIGRATIONS الفعلية وصلت v5 فتقفز apply_migrations() مباشرة "
-    "v1→v5 وتتجاهل حقن migration v2 الوهمية التي يبنيها الاختبار. مؤجَّل "
-    "لمرحلة استبدال PRAGMA runner بـAlembic (WORKFLOW.md §31.5) — ليس "
-    "شرطاً لاجتياز هذه البوابة، لكنه شرط لقبول Alembic لاحقاً.",
-]
+# لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة
+# هنا سابقاً، استُبدلت بالكامل بمنطق النظام الجديد (WORKFLOW.md §33.5)
+# ونجحت فعلياً، فلم تعد استثناءً. القائمة تبقى موجودة (فارغة) لتُستخدم
+# فوراً لو ظهر أي فشل معروف مستقبلاً — لا تُحذف الآلية نفسها.
+KNOWN_FAILURES: list[str] = []
 
 
 def run_regression() -> bool:
