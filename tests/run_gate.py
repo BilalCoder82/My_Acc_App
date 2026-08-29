@@ -31,6 +31,8 @@ REGRESSION_FILES = [
     "tests/test_alembic_integration.py",
     "tests/test_app_path_after_alembic.py",
     "tests/test_migration_safety.py",
+    "tests/test_migration_double_run_safety.py",
+    "tests/test_aggressive_currency_inventory.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة
