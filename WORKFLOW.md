@@ -1137,3 +1137,95 @@ Balance الأول (§29)، وهنا ثبتت أهميته الحاسمة عمل
 السابقة (8 مجموعات كاملة: سند القيد، دليل الحسابات، دليل المواد، الترحيل
 متعدد المواد، تحقيق Qt، الـE2E الشامل، الحالات الـ15) — لا رجوع بأي منها.
 **الخطوة التالية**: تحتاج قراراً من المستخدم وصديقه.
+
+---
+
+## §31 — خطة المرحلة 1 المتفَق عليها بعد §30 (قبل أي شاشة جديدة)
+
+بعد اكتشاف خطأ §30 (double conversion)، اتُّفِق على عدم الانتقال لأي واجهة
+جديدة قبل تثبيت محرك المحاسبة وفق ترتيب صارم:
+
+**إصلاح المحرك → money_types/guards → Fuzz+Oracle مستقل → Regression
+كامل (منفصل عن الـfuzz) → `fuzz_report.gate()==True` → Baseline رسمي
+→ Alembic → اختبار migration على بيانات حقيقية → حالات عدوانية →
+دورة المخزون → فواتير UI → Regression كامل مرة أخيرة.**
+
+### 31.1 حارس الاتساق (لا الحجم) — `app/services/sanity_guard.py`
+
+قرار مُصحَّح أثناء المراجعة: حارس مبني على "المبلغ كبير جداً" مرفوض
+عمداً — سيرفض معاملات مشروعة (100,000 USD بسعر صرف مرتفع مثلاً). البديل
+المعتمد: حارس **اتساق** يتحقق فقط أن `debit_base`/`credit_base` تطابق
+`raw × exchange_rate`، بصرف النظر عن حجم الرقم. مُدمَج فعلياً داخل
+`_jline()` بـ`app/services/posting.py` (وليس مجرد ملف منفصل غير مُستخدَم).
+
+### 31.2 `app/services/money_types.py` — طبقة اختيارية، غير مفروضة الآن
+
+كائنات `TransactionAmount`/`BaseCurrencyAmount` جاهزة للاعتماد التدريجي
+عند لمس أي دالة ترحيل مستقبلاً لسبب آخر — **لم تُستبدل بها استدعاءات
+`_jline`/`_jline_base` الحالية (~15 موضعاً)** لأن هذا حجم refactor غير
+مبرَّر الآن بعد أن أثبت sanity_guard.py فعاليته بتكلفة أقل بكثير.
+
+### 31.3 عتبة قبول fuzz — مُشتقة من السياسة الموثَّقة، لا رقماً اعتباطياً
+
+`tests/fuzz_report.py`: `MAX_ROUNDING_DIFF_BASE_CURRENCY = MONEY_QUANT × 2`
+(أي 0.02) — مأخوذة مباشرة من `app/services/money.py` (سياسة التقريب
+الرسمية: ROUND_HALF_UP على منزلتين)، لا رقماً افتراضياً اختُرع للاختبار.
+`AccountingSanityError` مسموح به = صفر، بلا استثناء.
+
+### 31.4 `tests/test_accounting_fuzz_oracle.py` — 200 سيناريو شراء عشوائي
+
+Oracle مستقل تماماً (لا يستدعي أي دالة من `app/services/`) يحسب المتوسط
+المرجّح يدوياً بمعادلة منفصلة، ويقارَن بالقيم الفعلية المخزَّنة مباشرة
+(`InventoryMovement.unit_cost`, `JournalLine.debit_base/credit_base`)
+بعد تشغيل `post_purchase_invoice` الحقيقي. **شُغِّل فعلياً على الكود
+الحالي بالمستودع — نجح بكل الـ200 سيناريو دون أي `AccountingSanityError`.**
+نطاق هذا الملف محدود عمداً بالشراء فقط (البيع/المرتجع/الضريبة تبقى
+مغطاة بـ`test_accounting_edge_cases.py` كحالات يدوية دقيقة).
+
+### 31.5 اكتشاف: `tests/test_migration_safety.py` معطَّل حالياً
+
+غير مرتبط بأي تعديل بهذه الجلسة — موجود مسبقاً بالمستودع. الاختبار يحاول
+محاكاة عميل بإصدار v1 ثم حقن migration v2 وهمية، لكن `MIGRATIONS` الفعلية
+بـ`app/migrations/runner.py` وصلت أصلاً لـv5، فـ`apply_migrations()` يقفز
+مباشرة v1→v5 من أول استدعاء ويتجاهل الحقن اللاحق. **قرار مؤجَّل**: يُصلَح
+الآن أم يُستبدَل بالكامل ضمن انتقال Alembic القادم (الأرجح، بما أن هذا
+النظام (PRAGMA runner) سيُستبدَل أصلاً).
+
+### 31.6 `tools/migration_manager.py` — مُجهَّز، غير مفعَّل
+
+نسخ احتياطي → فحص إصدار → ترقية → تحقق → `integrity_check` → التالي، مع
+عزل فشل أي عميل عن البقية. لا يُستدعى من أي مسار تشغيل حالي — ينتظر
+مرحلة إدخال Alembic الفعلية بعد اجتياز بوابة §31.3.
+
+**الخطوة التالية**: تشغيل `test_accounting_fuzz_oracle.py` +
+`test_accounting_edge_cases.py` + `test_e2e_scenario.py` معاً، تعبئة
+`FuzzReport.regression_suite_passed`، والتحقق من `gate() == True` قبل
+أي baseline رسمي.
+
+### 31.7 اشتقاق عتبة التقريب رياضياً (تصحيح على §31.3)
+
+الرقم 0.02 الثابت في §31.3 كان غير مبرَّر رياضياً — تم تصحيحه بتتبّع
+مسار التقريب الفعلي بالكود:
+1. `invoice_calc.py`: `money(net_final)` — تقريب لعملة المستند.
+2. `posting.py` `_jline()`: `money(debit × rate)` — تقريب ثانٍ عند التحويل للأساسية.
+
+خطوتا تقريب مستقلتان لكل سطر قيد، كل واحدة أقصى انحراف ±0.005 (نصف
+MONEY_QUANT). العتبة الصحيحة = **0.01 × عدد عمليات الشراء بالسيناريو**
+(`tests/fuzz_report.py: ScenarioResult.max_allowed_diff()`)، وليست رقماً
+ثابتاً بصرف النظر عن حجم السيناريو. مطبّقة فعلياً الآن، لا نظرياً فقط.
+
+### 31.8 تشغيل البوابة الفعلي — `tests/run_gate.py`
+
+يجمع Regression الحقيقي (تشغيل test_accounting_edge_cases.py +
+test_e2e_scenario.py + test_per_item_account_posting.py كعمليات فعلية،
+exit code) + fuzz+oracle، ويربطهما بـ`FuzzReport.regression_suite_passed`
+فعلياً بدل تركه `None` يدوياً. `test_migration_safety.py` مُستبعَد صراحة
+عبر `KNOWN_FAILURES` — يظهر دائماً في `fuzz_report.md`، لا يختفي بصمت،
+وفق الشرط المتفَق عليه: "known failure غير متعلق، لكن يجب ألا تختفي من
+قائمة المخاطر".
+
+**نتيجة التشغيل الفعلي بتاريخ هذه الجلسة: `gate() == PASS ✅`**
+(200/200 fuzz، Regression الثلاثة PASS، صفر AccountingSanityError).
+→ الشرطان المطلوبان قبل Baseline محسومان الآن. الخطوة التالية: Baseline
+رسمي (git tag + حفظ `reports_out/fuzz_report.md` كجزء من دليل الـbaseline
++ schema snapshot)، ثم Alembic.

@@ -28,6 +28,7 @@ from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_validation import validate_invoice_for_posting, InvoiceValidationError
 from app.services.item_queries import get_item_stock_summary
 from app.services.money import D, money
+from app.services.sanity_guard import assert_reasonable_conversion
 
 
 class PostingError(Exception):
@@ -68,9 +69,21 @@ def _jline(account_id: int, debit: Decimal, credit: Decimal, exchange_rate) -> J
     بـexchange_rate. لا تستخدمها لمبلغ محوَّل للعملة الأساسية مسبقاً؛ استخدم
     _jline_base بدلاً منها (راجع تعليقها لسبب وجود الاثنتين)."""
     d, c, rate = money(debit), money(credit), D(exchange_rate)
+    debit_base, credit_base = money(d * rate), money(c * rate)
+    # حارس اتساق (لا حجم — راجع sanity_guard.py): يتحقق فقط أن القيمة
+    # المخزَّنة تطابق raw×rate، بصرف النظر عن حجم المبلغ. تكلفته زهيدة
+    # وتبقيه فعّالاً ضد أي انحراف مستقبلي في هذا الحساب تحديداً.
+    assert_reasonable_conversion(
+        raw_amount=d, stored_base_amount=debit_base, exchange_rate=rate,
+        context=f"_jline debit account={account_id}",
+    )
+    assert_reasonable_conversion(
+        raw_amount=c, stored_base_amount=credit_base, exchange_rate=rate,
+        context=f"_jline credit account={account_id}",
+    )
     return JournalLine(
         account_id=account_id, debit=d, credit=c,
-        debit_base=money(d * rate), credit_base=money(c * rate),
+        debit_base=debit_base, credit_base=credit_base,
     )
 
 
