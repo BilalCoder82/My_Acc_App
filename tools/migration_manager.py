@@ -62,11 +62,22 @@ def integrity_check(db_path: Path) -> bool:
 
 
 def get_current_revision(db_path: Path) -> str | None:
-    conn = sqlite3.connect(db_path)
+    """
+    يُرجع None أيضاً إذا كان الملف تالفاً تماماً (لا جدول alembic_version
+    ولا حتى ملف SQLite صالح) — sqlite3.DatabaseError هو الصنف الأب لـ
+    OperationalError، فالتقاطه يغطي الحالتين معاً. اكتُشفت هذه الفجوة
+    فعلياً أثناء اختبار سيناريو ملف تالف (WORKFLOW.md §31.9) — كانت
+    OperationalError وحدها غير كافية وتسبَّبت بانهيار الأداة كاملة بدل
+    عزل الفشل لعميل واحد كما هو مقصود.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.DatabaseError:
+        return None
     try:
         row = conn.execute("SELECT version_num FROM alembic_version;").fetchone()
         return row[0] if row else None
-    except sqlite3.OperationalError:
+    except sqlite3.DatabaseError:
         return None
     finally:
         conn.close()
@@ -75,7 +86,12 @@ def get_current_revision(db_path: Path) -> str | None:
 def upgrade_one_client(
     client_id: str, db_path: Path, backup_dir: Path, alembic_ini: Path,
 ) -> ClientMigrationResult:
-    revision_before = get_current_revision(db_path)
+    # مُغلَّف بـtry أيضاً — لا يجوز لأي فشل هنا (حتى قبل النسخ الاحتياطي)
+    # أن يفلت من عزل الفشل الخاص بهذا العميل تحديداً.
+    try:
+        revision_before = get_current_revision(db_path)
+    except Exception:  # noqa: BLE001
+        revision_before = None
     try:
         backup_db(db_path, backup_dir)
         subprocess.run(
