@@ -43,7 +43,12 @@ class MigrationIntegrityError(Exception):
 
 def _alembic_config(db_path: Path) -> Config:
     cfg = Config(str(ALEMBIC_INI))
-    cfg.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    # اسم المجلد "alembic_migrations" وليس "alembic" عمداً — راجع WORKFLOW.md
+    # §38: مجلد باسم "alembic" في جذر المشروع يتعارض مع حزمة alembic نفسها
+    # عند غياب __init__.py (namespace package)، وهذا سبّب خطأ حقيقي فعلياً
+    # (ModuleNotFoundError: No module named 'alembic.config') على جهاز
+    # المستخدم رغم عمله في بيئة الاختبار هنا.
+    cfg.set_main_option("script_location", str(PROJECT_ROOT / "alembic_migrations"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     return cfg
 

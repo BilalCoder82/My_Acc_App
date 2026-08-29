@@ -103,7 +103,7 @@ try:
         cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True,
     )
     future_migration_path = [
-        p for p in (Path(__file__).resolve().parent.parent / "alembic" / "versions").glob("*future_demo_column*")
+        p for p in (Path(__file__).resolve().parent.parent / "alembic_migrations" / "versions").glob("*future_demo_column*")
     ][0]
     content = future_migration_path.read_text()
     content = content.replace(

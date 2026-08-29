@@ -45,7 +45,7 @@ result = subprocess.run(
     [sys.executable, "-m", "alembic", "revision", "-m", "test add notes column"],
     cwd=str(project_root), capture_output=True, text=True,
 )
-new_migration = list((project_root / "alembic" / "versions").glob("*test_add_notes_column*"))[0]
+new_migration = list((project_root / "alembic_migrations" / "versions").glob("*test_add_notes_column*"))[0]
 content = new_migration.read_text()
 content = content.replace(
     'def upgrade() -> None:\n    """Upgrade schema."""\n    pass',
