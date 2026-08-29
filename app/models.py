@@ -275,6 +275,34 @@ class InvoiceLine(Base):
 
 
 # ---------------------------------------------------------------------------
+# تسوية فاتورة (قبض/دفع) — راجع WORKFLOW.md §42 للقواعد المحاسبية كاملة.
+# فاتورة واحدة يمكن أن يكون لها عدة Settlement (دفعات جزئية متعددة).
+# لا حقل "balance_due" مخزَّن على الفاتورة عمداً — يُحسَب ديناميكياً دائماً
+# من إجمالي الفاتورة (compute_invoice_totals) ناقص مجموع Settlement.amount_foreign
+# المرتبطة بها، لتفادي أي احتمال فقدان تزامن بين حقل مخزَّن والواقع.
+# ---------------------------------------------------------------------------
+
+class Settlement(Base):
+    __tablename__ = "settlements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"))
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"))
+    kind: Mapped[str] = mapped_column(String(10))  # "receipt" | "payment"
+    settlement_date: Mapped[date] = mapped_column(Date, default=date.today)
+    # الجزء المُسوَّى من الفاتورة، بعملة الفاتورة نفسها (لا عملة القبض الفعلية)
+    amount_foreign: Mapped[float] = mapped_column(Numeric(14, 2))
+    settlement_rate: Mapped[float] = mapped_column(Numeric(14, 6))
+    # فرق الصرف الناتج عن هذه التسوية تحديداً، بالعملة الأساسية.
+    # موجب = ربح صرف، سالب = خسارة صرف (راجع WORKFLOW.md §42.3 للإشارة
+    # حسب نوع الحساب: عميل مقابل مورد معكوسان).
+    fx_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+
+    invoice: Mapped["Invoice"] = relationship()
+    journal_entry: Mapped["JournalEntry"] = relationship()
+
+
+# ---------------------------------------------------------------------------
 # تحويل بين مستودعات — لا تأثير محاسبي (حركة داخلية فقط)
 # ---------------------------------------------------------------------------
 

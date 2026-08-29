@@ -19,8 +19,9 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Account, AccountType
+from app.models import Account, AccountType
 from app.migrations.alembic_runner import ensure_schema_up_to_date, _current_revision, _head_revision, _alembic_config
+from tests._legacy_schema_helper import create_legacy_client_db
 
 TMP = Path("/tmp/test_migration_safety_new")
 if TMP.exists():
@@ -28,10 +29,10 @@ if TMP.exists():
 TMP.mkdir(parents=True)
 db_path = TMP / "legacy_v1_client.db"
 
-# محاكاة عميل قديم قبل أي Alembic إطلاقاً (بالضبط كما تفعل
-# create_company_database الحالية بـmodels.py)
+# محاكاة عميل قديم قبل أي Alembic إطلاقاً — من schema_snapshot.sql
+# المجمَّد (لا Base.metadata الحيّة، راجع WORKFLOW.md §43 لسبب هذا التغيير)
+create_legacy_client_db(str(db_path))
 engine = create_engine(f"sqlite:///{db_path}")
-Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 s = Session()
 s.add(Account(code="1101", name_ar="الصندوق", account_type=AccountType.ASSET))

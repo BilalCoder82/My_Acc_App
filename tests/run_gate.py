@@ -35,6 +35,7 @@ REGRESSION_FILES = [
     "tests/test_aggressive_currency_inventory.py",
     "tests/test_inventory_unit_cost_source_of_truth.py",
     "tests/test_full_inventory_lifecycle.py",
+    "tests/test_settlement_fx.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

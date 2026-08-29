@@ -14,8 +14,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
-from app.models import Base, Account, AccountType
+from sqlalchemy.orm import sessionmaker
+from app.models import Account, AccountType
 import app.migrations.alembic_runner as ar_module
+from tests._legacy_schema_helper import create_legacy_client_db
 
 TMP = Path("/tmp/test_double_run_safety")
 if TMP.exists():
@@ -23,9 +25,8 @@ if TMP.exists():
 TMP.mkdir(parents=True)
 db_path = TMP / "client.db"
 
+create_legacy_client_db(str(db_path))  # عميل قديم فعلي (من schema_snapshot.sql المجمَّد، لا Base.metadata الحيّة)
 engine = create_engine(f"sqlite:///{db_path}")
-Base.metadata.create_all(engine)  # عميل قديم بلا alembic_version
-from sqlalchemy.orm import sessionmaker
 s = sessionmaker(bind=engine)()
 s.add(Account(code="1101", name_ar="الصندوق", account_type=AccountType.ASSET))
 s.commit(); s.close(); engine.dispose()

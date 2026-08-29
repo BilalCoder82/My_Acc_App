@@ -54,6 +54,7 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
     revenue = acc("4", "الإيرادات", AccountType.REVENUE, is_group=True)
     sales = acc("4101", "المبيعات", AccountType.REVENUE, revenue)
     acc("4102", "مردودات ومسموحات المبيعات", AccountType.REVENUE, revenue)
+    fx_gain = acc("4103", "أرباح فروقات صرف", AccountType.REVENUE, revenue)
 
     # 5 تكلفة المبيعات
     cost_group = acc("5", "تكلفة المبيعات", AccountType.EXPENSE, is_group=True)
@@ -65,6 +66,11 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
     acc("6102", "إيجار", AccountType.EXPENSE, expenses)
     acc("6103", "كهرباء وماء", AccountType.EXPENSE, expenses)
     acc("6104", "مصروفات متنوعة", AccountType.EXPENSE, expenses)
+    # حساب منفصل عن fx_gain عمداً (لا حساب مشترك) — راجع WORKFLOW.md §42.3
+    # الكود 6106 وليس 6105 عمداً — 6105 مُستخدَم يدوياً بحساب فروقات صرف
+    # مؤقت داخل tests/test_e2e_scenario.py (أُنشئ يدوياً قبل وجود هذه
+    # الشجرة الافتراضية أصلاً)، لتفادي تصادم UNIQUE constraint.
+    fx_loss = acc("6106", "خسائر فروقات صرف", AccountType.EXPENSE, expenses)
 
     # ربط الإعدادات تلقائياً — الفواتير تشتغل فوراً بدون إعداد يدوي إضافي
     session.add_all([
@@ -76,11 +82,13 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
         Setting(key="ap_parent_account_id", value=str(ap_parent.id)),
         Setting(key="default_inventory_account_id", value=str(inventory.id)),
         Setting(key="default_cogs_account_id", value=str(cogs.id)),
+        Setting(key="default_fx_gain_account_id", value=str(fx_gain.id)),
+        Setting(key="default_fx_loss_account_id", value=str(fx_loss.id)),
     ])
     session.commit()
 
     return {
         "cash": cash, "bank": bank, "ar_parent": ar_parent, "inventory": inventory,
         "ap_parent": ap_parent, "sales_tax": sales_tax, "purchases_tax": purchases_tax,
-        "sales": sales, "cogs": cogs,
+        "sales": sales, "cogs": cogs, "fx_gain": fx_gain, "fx_loss": fx_loss,
     }

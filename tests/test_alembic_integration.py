@@ -26,6 +26,7 @@ from app.services.chart_of_accounts_template import create_default_chart_of_acco
 from app.services.item_edit import create_item
 from app.services.posting import post_purchase_invoice, post_sales_invoice
 from app.migrations.alembic_runner import ensure_schema_up_to_date, MigrationIntegrityError, _current_revision, _head_revision, _alembic_config
+from tests._legacy_schema_helper import create_legacy_client_db
 
 TMP = Path("/tmp/alembic_integration_test")
 if TMP.exists():
@@ -54,8 +55,8 @@ engine.dispose()
 
 # --- 2) عميل قديم موجود على Baseline (بلا Alembic، بيانات واقعية) ---
 legacy_client = TMP / "legacy_client.db"
+create_legacy_client_db(str(legacy_client))  # من schema_snapshot.sql المجمَّد — راجع WORKFLOW.md §43
 engine = create_engine(f"sqlite:///{legacy_client}")
-Base.metadata.create_all(engine)  # يحاكي بالضبط ما يفعله create_company_database الحالي
 s = sessionmaker(bind=engine)()
 coa = create_default_chart_of_accounts(s)
 item = create_item(s, sku="LEGACY-1", name_ar="مادة قديمة", unit="قطعة",
