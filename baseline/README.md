@@ -1,38 +1,38 @@
-# Baseline — v1-accounting-engine-stable
+# Baseline — v2-accounting-engine-with-alembic-and-inventory-integrity
 
-هذا الملف يوثّق ما يعنيه هذا الـBaseline تحديداً، وكيف يُستعاد ويُتحقق
-من سلامته من بيئة نظيفة. لا يُعدَّل هذا الملف لاحقاً — أي تحديث يستحق
+هذا الملف يوثّق ما يعنيه هذا الـBaseline تحديداً (النسخة الثانية —
+`v1-accounting-engine-stable` أصبح مرجعاً تاريخياً فقط، يسبق دمج Alembic
+بالكامل وإصلاح §39). لا يُعدَّل هذا الملف لاحقاً — أي تحديث يستحق
 Baseline جديداً بتاريخه وtag خاص به.
 
-## ما يشمله هذا الـBaseline
+## ما يضيفه v2 عن v1
 
-1. **محرك الترحيل مُصحَّح**: `_jline`/`_jline_base` (WORKFLOW.md §29, §30)
-   + حارس اتساق مُدمَج فعلياً في `_jline` (`app/services/sanity_guard.py`).
-2. **بوابة قبول آلية اجتازت فعلياً** (`reports_out/fuzz_report.md` +
-   `.json` في هذا المجلد) — راجع WORKFLOW.md §31 لتفاصيل الاشتقاق.
-3. **`schema_snapshot.sql`**: بنية قاعدة البيانات الكاملة كما ينتجها
-   `Base.metadata.create_all()` في هذه اللحظة بالضبط — مرجع لما قبل Alembic.
-4. **`environment.txt`**: نسخة Python والحزم الأساسية (SQLAlchemy, PySide6)
-   المستخدمة فعلياً وقت هذا الـBaseline.
-5. **`gate_report.json` / `gate_report.md`**: نسخة مجمَّدة من نتيجة
-   `tests/run_gate.py` وقت هذا الـBaseline (منفصلة عن `reports_out/`
-   الذي سيُستبدَل بتشغيلات لاحقة).
+1. **Alembic مدمج فعلياً بمسار التطبيق** (`app/db.py::open_company_db`)،
+   مُختبَر بخمس حالات معزولة + مسار تطبيق حقيقي كامل (WORKFLOW.md §33).
+2. **مجلد alembic أُعيد تسميته لـ`alembic_migrations/`** — يزيل تعارضاً
+   حقيقياً وقع فعلياً عند التشغيل على جهاز حقيقي (§38).
+3. **اختبارات عدوانية للعملات والمخزون** بـOracle مستقل، 23 تحققاً (§35).
+4. **دورة مخزون كاملة** عبر مستندات منفصلة، بربط الكمية والتكلفة والقيد
+   المحاسبي والتقارير معاً، 40 تحققاً (§37).
+5. **إصلاح جوهري في `get_item_stock_summary`**: حركات الخروج تُقيَّم
+   بتكلفتها التاريخية المخزَّنة، لا بمتوسط مُعاد حسابه — يُصحِّح تناقضاً
+   حقيقياً كان موجوداً بين تقرير المخزون ودفتر الأستاذ بعد أي مرتجع شراء
+   مرتبط بفاتورة أصلية (§39). قاعدة محاسبية موثَّقة رسمياً: "التاريخ لا
+   يُعاد تسعيره بأثر رجعي".
 
-## Known Failures وقت هذا الـBaseline (موروثة، لم تُحل هنا)
-
-- `tests/test_migration_safety.py` — راجع WORKFLOW.md §31.5. شرط لازم
-  لقبول Alembic لاحقاً، وليس لهذا الـBaseline.
+## Known Failures / فجوات منتجية موروثة (غير محلولة هنا عمداً)
+- `receipts/payments/settlement/fx_gain_loss` — غير موجودة بالمشروع
+  إطلاقاً (§35.6). قرار منتجي متروك: تُبنى الآن أم تُؤجَّل.
+- `app/migrations/runner.py` لم يُحذف بعد (يُستخدم لتحويل عملاء قدامى
+  لأول مرة فقط — §34). حذفه قرار مستقبلي منفصل.
 
 ## كيف تستعيد هذا الـBaseline وتتحقق منه من بيئة نظيفة
 
 ```bash
-git clone --branch v1-accounting-engine-stable <repo-url> restore-check
+git clone --branch v2-accounting-engine-with-alembic-and-inventory-integrity <repo-url> restore-check
 cd restore-check
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate   # أو .venv\Scripts\activate على ويندوز
 pip install -r requirements.txt
 python3 tests/run_gate.py   # يجب أن ينتهي بـ exit code = 0
 ```
 
-إذا فشل أي جزء من `run_gate.py` بعد استعادة الـBaseline في بيئة نظيفة،
-فهذا يعني أن الـBaseline لم يكن قابلاً للاستعادة فعلياً رغم وجود الـtag،
-ويجب معالجته قبل المتابعة إلى Alembic — لا يُفترض نجاحه لمجرد وجود الـtag.

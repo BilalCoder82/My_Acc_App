@@ -1,5 +1,6 @@
 Python 3.12.3
 
-# نسخ الحزم الفعلية المطابقة لـ requirements.txt (وليس كل حزم البيئة)
+# نسخ الحزم الفعلية المطابقة لـ requirements.txt
 Name: SQLAlchemy Version: 2.0.52 
 Name: PySide6 Version: 6.11.2 
+Name: alembic Version: 1.19.1 
