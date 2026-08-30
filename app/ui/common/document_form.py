@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
 from sqlalchemy.orm import Session
 
-from app.models import Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, Item
+from app.models import Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, Item, Warehouse
 from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_edit import add_line as service_add_line, EditNotAllowedError
 from app.services.invoice_validation import InvoiceValidationError
@@ -44,7 +44,7 @@ STATUS_STYLE = {
     InvoiceStatus.CANCELLED: ("ملغاة", "#DC2626"),
 }
 
-FIELD_WIDTHS = {"invoice_no": 160, "date": 140, "currency": 120, "exchange_rate": 120, "is_cash": 140}
+FIELD_WIDTHS = {"invoice_no": 160, "date": 140, "currency": 120, "exchange_rate": 120, "is_cash": 140, "warehouse": 180}
 
 CARD_STYLE = (
     "QFrame { background: white; border-radius: 6px; padding: 8px; "
@@ -174,6 +174,14 @@ class BaseDocumentFormView(QWidget):
         self.is_cash_combo = QComboBox()
         self.is_cash_combo.addItems(["نقدي", "آجل"])
 
+        # المستودع (WORKFLOW.md §46-§47): خاصية على مستوى الفاتورة، إلزامي
+        # اختياره صراحة — لا سقوط صامت لمستودع افتراضي غير ظاهر للمستخدم.
+        # العنصر الأول عمداً بلا userData صالح (placeholder غير قابل للقبول).
+        self.warehouse_combo = QComboBox()
+        self.warehouse_combo.addItem("-- اختر المستودع --", None)
+        for wh in self.session.query(Warehouse).filter_by(is_active=True).order_by(Warehouse.name_ar).all():
+            self.warehouse_combo.addItem(wh.name_ar, wh.id)
+
         party_row = QHBoxLayout()
         party_row.setSpacing(4)
         party_row.setContentsMargins(0, 0, 0, 0)
@@ -190,6 +198,10 @@ class BaseDocumentFormView(QWidget):
 
         grid.addWidget(labeled("العملة", self.currency_combo, FIELD_WIDTHS["currency"]), 1, 0)
         grid.addWidget(labeled("سعر الصرف", self.exchange_rate_spin, FIELD_WIDTHS["exchange_rate"]), 1, 1)
+        # المستودع بصف مستقل دائماً — لا يتصادم مع صف رابط المستند الأصلي
+        # بالمرتجعات (صف 1، أعمدة 2-4)، ويبقى واضحاً بارزاً كما اشتُرط
+        # صراحة ("ليس مخفياً في إعدادات أو قيمة افتراضية غير ظاهرة").
+        grid.addWidget(labeled("المستودع *", self.warehouse_combo, FIELD_WIDTHS["warehouse"]), 2, 0)
 
         if self.is_return:
             self.original_ref_edit = QLineEdit()
@@ -349,6 +361,10 @@ class BaseDocumentFormView(QWidget):
         self.party_edit.setText(original.party_name)
         self.currency_combo.setCurrentText(original.currency_code)
         self.exchange_rate_spin.setValue(float(original.exchange_rate))
+        # المرتجع المرتبط يرث مستودع الفاتورة الأصلية إلزامياً ويُقفَل
+        # (WORKFLOW.md §47.3): يجب أن تعود الكمية للمستودع الذي خرجت منه
+        # فعلياً، لا مستودع آخر يختاره المستخدم عن طريق الخطأ.
+        self._set_warehouse(original.warehouse_id, locked=True)
 
         lines = get_returnable_lines(self.session, original)
         self.grid.blockSignals(True)
@@ -379,6 +395,8 @@ class BaseDocumentFormView(QWidget):
         self.party_edit.setText(inv.party_name)
         self.currency_combo.setCurrentText(inv.currency_code)
         self.exchange_rate_spin.setValue(float(inv.exchange_rate))
+        is_linked_return = self.is_return and bool(inv.original_invoice_id)
+        self._set_warehouse(inv.warehouse_id, locked=is_linked_return)
         if self.is_return and inv.original_invoice_id:
             original = self.session.get(Invoice, inv.original_invoice_id)
             if original:
@@ -410,6 +428,10 @@ class BaseDocumentFormView(QWidget):
         widgets = [self.date_edit, self.party_edit, self.currency_combo, self.exchange_rate_spin]
         for widget in widgets:
             widget.setEnabled(not is_posted)
+        # المستودع: مقفل أيضاً لو مرتجع مرتبط بمستند أصلي (بصرف النظر عن
+        # حالة الترحيل — الوراثة إلزامية من لحظة الربط، لا من الترحيل فقط)
+        is_linked_return = self.is_return and self.invoice is not None and bool(self.invoice.original_invoice_id)
+        self.warehouse_combo.setEnabled(not is_posted and not is_linked_return)
         self.grid.setEditTriggers(
             QAbstractItemView.NoEditTriggers if is_posted else QAbstractItemView.AllEditTriggers
         )
@@ -563,7 +585,29 @@ class BaseDocumentFormView(QWidget):
         self.grand_total_label.setText(format_currency(totals.grand_total, currency))
 
     # -- حفظ وترحيل --------------------------------------------------------
+    def _set_warehouse(self, warehouse_id: int | None, *, locked: bool = False) -> None:
+        """يضبط اختيار المستودع بالـComboBox، ويقفله (تعطيل) إن طُلب —
+        للمرتجع المرتبط تحديداً: لا يجوز اختيار مستودع مختلف عن الذي
+        خرجت منه البضاعة فعلياً (WORKFLOW.md §47.3)."""
+        if warehouse_id is not None:
+            idx = self.warehouse_combo.findData(warehouse_id)
+            if idx >= 0:
+                self.warehouse_combo.setCurrentIndex(idx)
+        self.warehouse_combo.setEnabled(not locked)
+
+    def _selected_warehouse_id(self) -> int | None:
+        return self.warehouse_combo.currentData()
+
+    def _validate_warehouse_selected(self) -> bool:
+        """لا سقوط صامت لمستودع افتراضي — رفض واضح إن لم يُختَر (WORKFLOW.md §47)."""
+        if self._selected_warehouse_id() is None:
+            QMessageBox.warning(self, "المستودع مطلوب", "يجب اختيار المستودع قبل الحفظ أو الترحيل.")
+            return False
+        return True
+
     def _save_draft(self) -> None:
+        if not self._validate_warehouse_selected():
+            return
         temp = self._build_transient_invoice()
         if temp is None:
             QMessageBox.warning(self, "تنبيه", "لا يوجد بنود صالحة بالمستند")
@@ -577,9 +621,14 @@ class BaseDocumentFormView(QWidget):
                 currency_code=self.currency_combo.currentText(),
                 exchange_rate=Decimal(str(self.exchange_rate_spin.value())),
                 original_invoice_id=getattr(self, "_original_invoice_id", None),
+                warehouse_id=self._selected_warehouse_id(),
             )
             self.session.add(self.invoice)
             self.session.flush()
+        else:
+            # مسودة موجودة يُعاد حفظها — نُزامن المستودع من الـComboBox
+            # دائماً (قد يكون المستخدم عدّله قبل إعادة الحفظ)
+            self.invoice.warehouse_id = self._selected_warehouse_id()
 
         for line in list(self.invoice.lines):
             self.session.delete(line)
@@ -601,6 +650,11 @@ class BaseDocumentFormView(QWidget):
             self._save_draft()
         if self.invoice is None:
             return
+        if not self._validate_warehouse_selected():
+            return
+        # مزامنة أخيرة قبل الترحيل مباشرة — يحمي من تعديل الـComboBox
+        # بعد آخر حفظ مسودة دون إعادة حفظها
+        self.invoice.warehouse_id = self._selected_warehouse_id()
 
         confirm = QMessageBox.question(
             self, "تأكيد الترحيل",

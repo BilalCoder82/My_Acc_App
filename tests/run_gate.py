@@ -39,6 +39,8 @@ REGRESSION_FILES = [
     "tests/test_cancel_invoice.py",
     "tests/test_warehouse_aggregate_view.py",
     "tests/test_warehouse_cost_isolation.py",
+    "tests/test_qt_editor_lifecycle.py",
+    "tests/test_ui_warehouse_integration.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة
