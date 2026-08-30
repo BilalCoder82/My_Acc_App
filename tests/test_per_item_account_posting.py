@@ -54,7 +54,7 @@ session.commit()
 invoice = Invoice(
     invoice_no="SI-1", kind=InvoiceKind.SALES, party_name="عميل تجريبي",
     invoice_date=today, currency_code="SYP", exchange_rate=Decimal("1"),
-    status=InvoiceStatus.DRAFT,
+    status=InvoiceStatus.DRAFT, warehouse_id=wh.id,
 )
 invoice.lines = [
     InvoiceLine(item_id=item_a.id, quantity=5, unit_price=Decimal("50")),   # 250, cost 5*10=50
@@ -87,7 +87,7 @@ print("T1 OK: multi-item sales invoice splits sales/COGS/inventory correctly per
 return_invoice = Invoice(
     invoice_no="SR-1", kind=InvoiceKind.SALES_RETURN, party_name="عميل تجريبي",
     invoice_date=today, currency_code="SYP", exchange_rate=Decimal("1"),
-    status=InvoiceStatus.DRAFT, original_invoice_id=invoice.id,
+    status=InvoiceStatus.DRAFT, original_invoice_id=invoice.id, warehouse_id=wh.id,
 )
 return_invoice.lines = [
     InvoiceLine(item_id=item_a.id, quantity=2, unit_price=Decimal("50")),  # 100, cost 2*10=20

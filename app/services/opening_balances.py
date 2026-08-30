@@ -21,12 +21,17 @@ from app.services.posting import get_default_warehouse
 
 def set_item_opening_balance(
     session: Session, item_id: int, quantity: float, unit_cost: float,
-    as_of_date: date | None = None,
+    as_of_date: date | None = None, warehouse_id: int | None = None,
 ) -> InventoryMovement:
     """
     يسجّل رصيد افتتاحي لمادة معيّنة. يجب استدعاؤها قبل أي حركة بيع/شراء
     لهذه المادة، وبتاريخ أقدم من أي فاتورة — وإلا ينكسر ترتيب حساب
     المتوسط المرجّح (average cost يعتمد على الترتيب الزمني للحركات).
+
+    warehouse_id: المستودع الذي يبدأ فيه الرصيد فعلياً — اختياري، يسقط
+    للمستودع الافتراضي إن تُرك فارغاً (نفس نمط _invoice_warehouse_id،
+    راجع WORKFLOW.md §46 — التكلفة منفصلة لكل مستودع، فالرصيد الافتتاحي
+    يجب أن يُنسَب لمستودعه الصحيح لا الافتراضي دائماً بصمت).
     """
     item = session.get(Item, item_id)
     if item is None:
@@ -43,7 +48,7 @@ def set_item_opening_balance(
 
     movement = InventoryMovement(
         item_id=item_id,
-        warehouse_id=get_default_warehouse(session).id,
+        warehouse_id=warehouse_id or get_default_warehouse(session).id,
         direction=MovementDirection.IN,
         quantity=quantity,
         unit_cost=unit_cost,

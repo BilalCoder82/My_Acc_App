@@ -101,12 +101,14 @@ def _jline_base(account_id: int, debit_base: Decimal, credit_base: Decimal) -> J
     return JournalLine(account_id=account_id, debit=d, credit=c, debit_base=d, credit_base=c)
 
 
-def _average_cost(session: Session, item_id: int) -> Decimal:
-    """كلفة الوحدة الحالية = آخر متوسط مرجّح محفوظ من حركات الدخول (كل المستودعات).
-    مصدر الحساب الفعلي الآن app/services/item_queries.py (get_item_stock_summary)
-    — نفس الخوارزمية بالضبط، لكن بمكان واحد فقط بدل نسختين قد تنحرفان عن
-    بعضهما لاحقاً (راجع WORKFLOW.md §25)."""
-    return get_item_stock_summary(session, item_id).average_cost
+def _average_cost(session: Session, item_id: int, warehouse_id: int) -> Decimal:
+    """كلفة الوحدة الحالية **لمستودع محدد تحديداً** (WORKFLOW.md §46 —
+    التكلفة منفصلة لكل مستودع، لا موحّدة على مستوى الشركة). لا قيمة
+    افتراضية لـwarehouse_id عمداً — كل استدعاء محاسبي فعلي يجب أن يعرف
+    مستودعه بوضوح، لمنع أي انزلاق صامت لخلط التكلفة بين المستودعات مرة
+    أخرى. مصدر الحساب الفعلي app/services/item_queries.py
+    (get_item_stock_summary) — نفس الخوارزمية بالضبط، بمكان واحد فقط."""
+    return get_item_stock_summary(session, item_id, warehouse_id=warehouse_id).average_cost
 
 
 def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True) -> JournalEntry:
@@ -157,7 +159,7 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         sales_acc_id = item.sales_account_id or default_sales_acc
         sales_credits[sales_acc_id] = sales_credits.get(sales_acc_id, Decimal("0")) + line_total.net_after_all_discounts
 
-        unit_cost = _average_cost(session, item.id)
+        unit_cost = _average_cost(session, item.id, warehouse_id)
         line_cogs = money(unit_cost * D(line_total.line.quantity))
         cogs_debits[item.cogs_account_id] = cogs_debits.get(item.cogs_account_id, Decimal("0")) + line_cogs
         inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cogs

@@ -30,9 +30,15 @@ class ItemStockSummary:
     inventory_value: Decimal
 
 
-def get_item_stock_summary(session: Session, item_id: int) -> ItemStockSummary:
-    """الكمية الحالية ومتوسط التكلفة عبر كل المستودعات (مستودع افتراضي واحد
-    فعلياً حالياً — راجع get_default_warehouse بـposting.py).
+def get_item_stock_summary(session: Session, item_id: int, warehouse_id: int | None = None) -> ItemStockSummary:
+    """الكمية الحالية ومتوسط التكلفة.
+
+    **قرار معتمد (WORKFLOW.md §46)**: التكلفة منفصلة لكل مستودع، لا موحّدة
+    على مستوى الشركة. `warehouse_id=None` يُرجع إجمالي كل المستودعات
+    (تجميعي شرعي لأغراض العرض/التقرير فقط — مثال: "إجمالي ما تملكه
+    الشركة") — **ممنوع استخدام `None` لأي قرار تسعير أو ترحيل فعلي**؛
+    كل استدعاء محاسبي (COGS، مرتجع) يجب أن يمرّر `warehouse_id` صراحة
+    (`_average_cost()` لا تقبل قيمة افتراضية أصلاً لهذا السبب بالضبط).
 
     قاعدة محاسبية أساسية (WORKFLOW.md §39): كل حركة *خروج* تُقيَّم بتكلفتها
     الخاصة المخزَّنة فعلياً على الحركة نفسها (movement.unit_cost) — لا
@@ -41,11 +47,10 @@ def get_item_stock_summary(session: Session, item_id: int) -> ItemStockSummary:
     الدالة تنتج نفس القيمة تماماً التي استُخدمت فعلياً وقت الترحيل
     (بما فيها حالة مرتجع شراء مرتبط بفاتورة أصلية، حيث unit_cost تاريخي
     يختلف عمداً عن المتوسط الحالي وقت الإرجاع)."""
-    movements = session.execute(
-        select(InventoryMovement)
-        .where(InventoryMovement.item_id == item_id)
-        .order_by(InventoryMovement.movement_date)
-    ).scalars().all()
+    query = select(InventoryMovement).where(InventoryMovement.item_id == item_id)
+    if warehouse_id is not None:
+        query = query.where(InventoryMovement.warehouse_id == warehouse_id)
+    movements = session.execute(query.order_by(InventoryMovement.movement_date)).scalars().all()
 
     total_qty, total_cost = Decimal("0"), Decimal("0")
     for m in movements:

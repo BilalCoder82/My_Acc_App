@@ -102,7 +102,7 @@ def get_returnable_lines(session: Session, original_invoice: Invoice) -> list[di
     return result
 
 
-def _return_unit_cost(session: Session, item_id: int, original_invoice: Invoice | None) -> Decimal:
+def _return_unit_cost(session: Session, item_id: int, original_invoice: Invoice | None, warehouse_id: int) -> Decimal:
     if original_invoice is not None:
         movement = session.execute(
             select(InventoryMovement).where(
@@ -113,8 +113,10 @@ def _return_unit_cost(session: Session, item_id: int, original_invoice: Invoice 
         ).scalars().first()
         if movement is not None:
             return D(movement.unit_cost)
-    # مرتجع حر بدون ربط، أو لم نجد حركة أصلية مطابقة: المتوسط المرجّح الحالي
-    return _average_cost(session, item_id)
+    # مرتجع حر بدون ربط، أو لم نجد حركة أصلية مطابقة: المتوسط المرجّح
+    # الحالي **لمستودع المرتجع نفسه تحديداً** (WORKFLOW.md §46) — لا
+    # خلط مع أي مستودع آخر.
+    return _average_cost(session, item_id, warehouse_id)
 
 
 def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool = True) -> JournalEntry:
@@ -166,7 +168,7 @@ def post_sales_return(session: Session, return_invoice: Invoice, is_cash: bool =
         sales_acc_id = item.sales_account_id or default_sales_acc
         sales_debits[sales_acc_id] = sales_debits.get(sales_acc_id, Decimal("0")) + line_total.net_after_all_discounts
 
-        unit_cost = _return_unit_cost(session, item.id, original_invoice)
+        unit_cost = _return_unit_cost(session, item.id, original_invoice, warehouse_id)
         line_cost = money(unit_cost * D(line_total.line.quantity))
         inventory_debits[item.inventory_account_id] = inventory_debits.get(item.inventory_account_id, Decimal("0")) + line_cost
         cogs_credits[item.cogs_account_id] = cogs_credits.get(item.cogs_account_id, Decimal("0")) + line_cost
@@ -259,7 +261,7 @@ def post_purchase_return(session: Session, return_invoice: Invoice, is_cash: boo
         item = session.get(Item, line_total.line.item_id)
         total_tax += line_total.tax_amount
 
-        unit_cost = _return_unit_cost(session, item.id, original_invoice)
+        unit_cost = _return_unit_cost(session, item.id, original_invoice, warehouse_id)
         line_cost = money(unit_cost * D(line_total.line.quantity))
         total_cost += line_cost
         inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cost
