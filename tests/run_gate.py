@@ -43,6 +43,7 @@ REGRESSION_FILES = [
     "tests/test_ui_warehouse_integration.py",
     "tests/test_comprehensive_review.py",
     "tests/test_settlement_tamper_resistance.py",
+    "tests/test_ui_settlement_and_cancel.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

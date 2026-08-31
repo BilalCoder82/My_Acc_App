@@ -47,8 +47,11 @@ class _ReturnKeyEditingMixin:
     (دالة بدون معاملات، أو None لتعطيل الاعتراض والعودة للسلوك الافتراضي)."""
 
     def _install_return_filter(self, editor) -> None:
-        if getattr(self, "on_return", None) is not None:
-            editor.installEventFilter(self)
+        # يُثبَّت دائماً طالما هناك محرِّر فعلي — ليس فقط عند وجود on_return،
+        # لأن معالجة Esc (أدناه بـeventFilter) يجب أن تعمل حتى لو لم يُمرَّر
+        # on_return لهذه الشبكة تحديداً. تمرير Enter/Return يبقى مشروطاً بوجود
+        # on_return كما كان (خلاف ذلك السلوك الافتراضي لكيوت يبقى ساري المفعول).
+        editor.installEventFilter(self)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (اسم Qt القياسي)
         if (
@@ -59,6 +62,13 @@ class _ReturnKeyEditingMixin:
             self.commitData.emit(obj)
             self.closeEditor.emit(obj, QAbstractItemDelegate.NoHint)
             self.on_return()
+            return True
+        # Esc — إلغاء التعديل الحالي دون حفظ، يعيد الخلية لقيمتها السابقة
+        # (UI_DESIGN.md §45-أ). مُعالَج صراحةً هنا بدل الاعتماد على سلوك
+        # كيوت الافتراضي الضمني، ليبقى مضموناً وقابلاً للاختبار مباشرة —
+        # RevertModelCache تتجاهل commitData وتعيد النموذج لقيمته الأصلية.
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self.closeEditor.emit(obj, QAbstractItemDelegate.RevertModelCache)
             return True
         return super().eventFilter(obj, event)
 

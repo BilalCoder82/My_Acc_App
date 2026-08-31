@@ -12,12 +12,14 @@ Base Document Form — الأساس المشترك لكل الفواتير وا�
 """
 
 from __future__ import annotations
+from datetime import date
 from decimal import Decimal
 from typing import Callable
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QDateEdit,
     QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QPushButton,
-    QLabel, QHeaderView, QMessageBox, QAbstractItemView, QFrame, QSizePolicy
+    QLabel, QHeaderView, QMessageBox, QAbstractItemView, QFrame, QSizePolicy,
+    QDialog,
 )
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
@@ -28,7 +30,10 @@ from app.services.invoice_calc import compute_invoice_totals
 from app.services.invoice_edit import add_line as service_add_line, EditNotAllowedError
 from app.services.invoice_validation import InvoiceValidationError
 from app.services.invoice_queries import list_items
+from app.services.settlements import get_invoice_balance_due, SettlementError
+from app.services.invoice_cancel import cancel_invoice, CancelNotAllowedError
 from app.ui.common.numeric_delegate import NumericGridDelegate, format_currency
+from app.ui.common.settlement_dialog import SettlementDialog
 
 GRID_COLUMNS = ["كود", "المادة", "الكمية", "السعر", "الحسم %", "الضريبة %", "الإجمالي"]
 COL_CODE, COL_ITEM, COL_QTY, COL_PRICE, COL_DISC, COL_TAX, COL_TOTAL = range(7)
@@ -288,8 +293,32 @@ class BaseDocumentFormView(QWidget):
             "background: white; font-size: 12px;"
         )
 
+        # تسوية (قبض/دفع) — يفتح نافذة منبثقة منفصلة (SettlementDialog)،
+        # لا تبويباً داخل هذا النموذج (قرار صريح). ظاهر فقط لفواتير
+        # البيع/الشراء الأصلية (لا المرتجعات — لا خدمة تسوية لها أصلاً).
+        self.settlement_btn = QPushButton("تسوية (قبض/دفع)")
+        self.settlement_btn.setStyleSheet(
+            "padding: 8px 20px; border: 1px solid #D1D5DB; border-radius: 4px; "
+            "background: white; font-size: 12px; color: #2563EB;"
+        )
+        self.settlement_btn.clicked.connect(self._open_settlement_dialog)
+
+        # إلغاء الفاتورة (Cancel/Reverse) — منفصل تماماً عن زر المرتجع.
+        # يبقى ظاهراً/مفعّلاً دائماً على أي فاتورة POSTED حتى لو كانت لها
+        # تسويات مرتبطة — قرار الرفض يبقى في cancel_invoice() (Business
+        # Logic)، لا في الـUI (طلب Bilal صراحة: لا نُخفي الزر حسب حالة
+        # التسوية).
+        self.cancel_btn = QPushButton("إلغاء الفاتورة (Cancel)")
+        self.cancel_btn.setStyleSheet(
+            "padding: 8px 20px; border: 1px solid #FCA5A5; border-radius: 4px; "
+            "background: white; font-size: 12px; color: #DC2626;"
+        )
+        self.cancel_btn.clicked.connect(self._cancel_invoice)
+
         actions.addWidget(post_btn)
         actions.addWidget(save_btn)
+        actions.addWidget(self.settlement_btn)
+        actions.addWidget(self.cancel_btn)
         actions.addWidget(print_btn)
         actions.addStretch()
 
@@ -302,6 +331,10 @@ class BaseDocumentFormView(QWidget):
         self.subtotal_label = self._totals_row(t_layout, "الإجمالي قبل الضريبة", "0.00")
         self.discount_label = self._totals_row(t_layout, "الخصم", "0.00")
         self.tax_label = self._totals_row(t_layout, "الضريبة", "0.00")
+        # الرصيد المستحق: يُحسَب ديناميكياً من get_invoice_balance_due عند
+        # كل تحديث لحالة الفاتورة (لا حقل مخزَّن) — يظهر فقط لفاتورة
+        # POSTED غير نقدية بالكامل، راجع _refresh_balance_due أدناه.
+        self.balance_due_label = self._totals_row(t_layout, "الرصيد المستحق", "—")
 
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -435,6 +468,61 @@ class BaseDocumentFormView(QWidget):
         self.grid.setEditTriggers(
             QAbstractItemView.NoEditTriggers if is_posted else QAbstractItemView.AllEditTriggers
         )
+
+        # تسوية: فقط لفاتورة POSTED من نوع بيع/شراء أصلي (لا مرتجعات —
+        # post_receipt/post_payment ترفضان أي نوع آخر في الخدمة أصلاً).
+        self.settlement_btn.setEnabled(
+            is_posted and self.kind in (InvoiceKind.SALES, InvoiceKind.PURCHASE)
+        )
+        # إلغاء: ظاهر ومفعّل على أي فاتورة POSTED بصرف النظر عن التسويات —
+        # الرفض (لو كانت هناك تسوية) يظهر برسالة من cancel_invoice() نفسها
+        # عند الضغط، لا بإخفاء الزر مسبقاً (قرار Bilal الصريح).
+        self.cancel_btn.setEnabled(is_posted)
+        self._refresh_balance_due()
+
+    def _refresh_balance_due(self) -> None:
+        if self.invoice is None or self.invoice.status != InvoiceStatus.POSTED:
+            self.balance_due_label.setText("—")
+            return
+        try:
+            balance = get_invoice_balance_due(self.session, self.invoice)
+        except SettlementError:
+            # فاتورة نقدية بالكامل وقت الترحيل — لا رصيد مستحق أصلاً
+            self.balance_due_label.setText("—")
+            return
+        self.balance_due_label.setText(format_currency(balance, self.invoice.currency_code))
+
+    # -- تسوية (قبض/دفع) --------------------------------------------------
+    def _open_settlement_dialog(self) -> None:
+        if self.invoice is None or self.invoice.status != InvoiceStatus.POSTED:
+            QMessageBox.warning(self, "تنبيه", "الفاتورة يجب أن تكون مرحّلة أولاً لإجراء تسوية")
+            return
+        dialog = SettlementDialog(self.session, self.invoice, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            # تحديث الرصيد المعروض في نموذج الفاتورة مباشرة بعد نجاح التسوية
+            self._refresh_balance_due()
+
+    # -- إلغاء الفاتورة (Cancel/Reverse) -----------------------------------
+    def _cancel_invoice(self) -> None:
+        if self.invoice is None or self.invoice.status != InvoiceStatus.POSTED:
+            return
+        confirm = QMessageBox.question(
+            self, "تأكيد الإلغاء",
+            f"هل تريد إلغاء {self.doc_title} رقم {self.invoice.invoice_no}؟\n"
+            "سيُعكَس القيد وحركات المخزون بالكامل. لا يمكن التراجع عن هذا الإجراء.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            cancel_invoice(self.session, self.invoice, date.today())
+            self.session.commit()
+        except CancelNotAllowedError as e:
+            self.session.rollback()
+            QMessageBox.critical(self, "تعذّر الإلغاء", str(e))
+            return
+        QMessageBox.information(self, "تم", f"تم إلغاء {self.doc_title} بنجاح")
+        self._load_invoice()
 
     def _close_current_editor(self) -> None:
         current_item = self.grid.currentItem()
