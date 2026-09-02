@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from sqlalchemy.orm import Session
 
-from app.models import Account, AccountType
+from app.models import Account, AccountType, AccountSubtype
 from app.services.account_edit import create_account, update_account, AccountEditError, VALID_CURRENCIES
 from app.reports.rollup import get_account_balance, DEBIT_NORMAL_TYPES
 
@@ -28,6 +28,19 @@ TYPE_LABELS = {
     AccountType.EXPENSE: "مصروفات",
 }
 TYPE_LABELS_REV = {v: k for k, v in TYPE_LABELS.items()}
+
+# §56 (مراجعة Bilal): تصنيف عمل صريح مستقل عن account_type — "رقم
+# الحساب ليس Business Rule"، والتصنيف يُحفَظ صراحة لا يُستنتَج.
+SUBTYPE_LABELS = {
+    AccountSubtype.GENERAL: "عام",
+    AccountSubtype.CUSTOMER: "عميل",
+    AccountSubtype.SUPPLIER: "مورد",
+    AccountSubtype.CASH: "صندوق",
+    AccountSubtype.BANK: "بنك",
+    AccountSubtype.EXPENSE: "مصروف",
+    AccountSubtype.INCOME: "إيراد",
+    AccountSubtype.OTHER: "أخرى",
+}
 
 COLOR_BG = "#F5F7FA"
 
@@ -112,6 +125,20 @@ class AccountCardDialog(QDialog):
         form.addWidget(self.natural_balance_label, r, 0)
         r += 1
 
+        # §56: تصنيف العمل الفرعي — منفصل تماماً عن "نوع الحساب"
+        # (account_type) أعلاه. لا استنتاج تلقائي هنا (المستخدم يختار
+        # صراحة)، ولا تفعيل تلقائي للتسوية بمجرد اختيار عميل/مورد —
+        # allow_reconciliation خانة مستقلة تماماً بالأسفل.
+        form.addWidget(QLabel("نوع الحساب الفرعي"), r, 1)
+        self.subtype_combo = field_style(QComboBox())
+        self.subtype_combo.setLayoutDirection(Qt.RightToLeft)
+        for st in AccountSubtype:
+            self.subtype_combo.addItem(SUBTYPE_LABELS[st], st)
+        if account:
+            self.subtype_combo.setCurrentText(SUBTYPE_LABELS[account.subtype])
+        form.addWidget(self.subtype_combo, r, 0)
+        r += 1
+
         layout.addLayout(form)
 
         checks_row = QHBoxLayout()
@@ -121,6 +148,13 @@ class AccountCardDialog(QDialog):
         self.is_active_check = QCheckBox("الحساب نشط")
         self.is_active_check.setChecked(bool(account.is_active) if account else True)
         checks_row.addWidget(self.is_active_check)
+        # §56: allow_reconciliation خانة صريحة مستقلة — القاعدة التي
+        # تتحقق منها الخدمة فعلياً (settlements.py)، لا subtype ولا
+        # account_type ولا رقم الحساب. لا تُفعَّل تلقائياً حتى لو
+        # subtype=CUSTOMER/SUPPLIER — قرار صريح لكل حساب على حدة.
+        self.allow_reconciliation_check = QCheckBox("يسمح بتسوية الفواتير")
+        self.allow_reconciliation_check.setChecked(bool(account.allow_reconciliation) if account else False)
+        checks_row.addWidget(self.allow_reconciliation_check)
         layout.addLayout(checks_row)
 
         self._refresh_natural_balance()
@@ -212,6 +246,8 @@ class AccountCardDialog(QDialog):
             code=self.code_edit.text(), name_ar=self.name_edit.text(), account_type=account_type,
             parent_id=parent_id, currency_code=self.currency_combo.currentText(),
             is_group=self.is_group_check.isChecked(), is_active=self.is_active_check.isChecked(),
+            subtype=self.subtype_combo.currentData(),
+            allow_reconciliation=self.allow_reconciliation_check.isChecked(),
         )
         try:
             if self.account is None:

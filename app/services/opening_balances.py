@@ -5,14 +5,25 @@ Opening Balances — أرصدة افتتاحية (حسابات ومواد)
 قبل تسجيل أي فاتورة. بدون هذا، أي كشف حساب أو تقرير مخزون لاحق يكون
 ناقصاً أو مضللاً.
 
-ملاحظة: رصيد الحسابات الافتتاحي (opening balance للـChart of Accounts)
-يُسجَّل بقيد يدوي عادي (JournalEntry بـsource_type='opening_balance')،
-لا يحتاج دالة خاصة — هذا التوثيق كافٍ. أما رصيد المواد فيحتاج دالة لأنه
-يمس InventoryMovement + المتوسط المرجّح مباشرة.
+Phase 3B-1 (مُعتمَد من Bilal — راجع PHASE3_DESIGN_SPEC.md §6/§9/§11):
+الأرصدة الافتتاحية للحسابات العامة أصبحت الآن دالة مخصصة فعلياً
+(`post_opening_account_balances` أدناه) — الملاحظة القديمة أعلاه
+("لا يحتاج دالة خاصة، قيد يدوي عادي كافٍ") كانت صحيحة قبل اعتماد
+المواصفة، وأصبحت متجاوَزة الآن: القيد اليدوي وحده لا يفرض حساب Clearing
+إلزامياً من إعدادات الشركة، ولا يمنع تكرار الترحيل (Idempotency)، ولا
+يحتفظ بسجل تدقيق منفصل (`OpeningBalanceEntry`) — كل هذه قواعد عمل
+صريحة يجب فرضها بالخدمة، لا تركها لتقدير كل استدعاء يدوي.
+
+النطاق: **حسابات عامة فقط** (3B-1). المخزون الافتتاحي (دالة
+`set_item_opening_balance` أدناه، موجودة مسبقاً، غير مُوسَّعة هذه
+الجولة عمداً) وأرصدة العملاء/الموردين الافتتاحية التفصيلية مؤجَّلة
+لـ3B-2/3B-3 بالترتيب المُعتمَد — لا تُضَف هنا قبل ذلك.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.models import InventoryMovement, MovementDirection, Item
@@ -59,3 +70,188 @@ def set_item_opening_balance(
     session.add(movement)
     session.flush()
     return movement
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B-1 — الأرصدة الافتتاحية للحسابات العامة فقط
+# ---------------------------------------------------------------------------
+# مبدأ التصميم: لا آلية ترحيل جديدة. يُعاد استخدام add_manual_line() +
+# post_manual_entry() الموجودتين فعلياً بـjournal_edit.py حرفياً — القيد
+# الافتتاحي قيد يدوي عادي بمنظور المحرك، فقط بقواعد تحقق إضافية قبل
+# بنائه (حساب Clearing إلزامي من إعدادات الشركة، منع تكرار الترحيل).
+
+from app.models import Account, AccountType, JournalEntry, JournalEntryStatus, Setting, OpeningBalanceEntry
+from app.services.journal_edit import add_manual_line, post_manual_entry, reverse_manual_entry
+from app.services.posting import get_base_currency, _next_ref_no
+from app.services.money import money, rate as rate_
+
+OPENING_BALANCES_SETTING_KEY = "opening_balances_accounts_posted_at"
+CLEARING_ACCOUNT_SETTING_KEY = "opening_balance_clearing_account_id"
+
+
+class OpeningBalanceError(Exception):
+    pass
+
+
+@dataclass
+class OpeningBalanceLineInput:
+    """سطر رصيد افتتاحي واحد كما يُدخِله المستخدم — قبل أي تحويل محاسبي."""
+    account_id: int
+    debit_foreign: Decimal = field(default_factory=lambda: Decimal("0"))
+    credit_foreign: Decimal = field(default_factory=lambda: Decimal("0"))
+    currency_code: str | None = None  # None = يرث العملة الأساسية للشركة (get_base_currency)
+    exchange_rate: Decimal = field(default_factory=lambda: Decimal("1"))
+
+
+def _get_clearing_account(session: Session) -> Account:
+    """§6: حساب التوازن إعداد شركة إلزامي — لا اختراع تلقائي. يجب أن
+    يكون موجوداً، غير تجميعي، نشطاً، ونوعه EQUITY حصراً (فصل مفاهيمي
+    عن أرباح/مصاريف الفترة الحالية، طلب Bilal الصريح)."""
+    row = session.get(Setting, CLEARING_ACCOUNT_SETTING_KEY)
+    if row is None or not row.value:
+        raise OpeningBalanceError(
+            "لم يُحدَّد حساب التوازن الافتتاحي (Opening Balance Clearing) بإعدادات الشركة بعد — "
+            "حدّده أولاً قبل إدخال أي رصيد افتتاحي"
+        )
+    account = session.get(Account, int(row.value))
+    if account is None:
+        raise OpeningBalanceError(
+            f"حساب التوازن الافتتاحي المحدَّد بإعدادات الشركة (id={row.value}) غير موجود فعلياً"
+        )
+    if account.is_group:
+        raise OpeningBalanceError(f"حساب التوازن الافتتاحي ({account.name_ar}) حساب تجميعي — لا يقبل قيوداً مباشرة")
+    if not account.is_active:
+        raise OpeningBalanceError(f"حساب التوازن الافتتاحي ({account.name_ar}) غير نشط")
+    if account.account_type != AccountType.EQUITY:
+        raise OpeningBalanceError(
+            f"حساب التوازن الافتتاحي ({account.name_ar}) يجب أن يكون من نوع حقوق الملكية (EQUITY) — "
+            f"نوعه الحالي {account.account_type.value}. لا يجوز أن يكون إيراداً أو مصروفاً "
+            "(يشوّه قياس ربحية الفترة الحالية)."
+        )
+    return account
+
+
+def _validate_entry_account(session: Session, account_id: int, clearing_id: int) -> Account:
+    account = session.get(Account, account_id)
+    if account is None:
+        raise OpeningBalanceError(f"حساب غير موجود (id={account_id})")
+    if account.is_group:
+        raise OpeningBalanceError(f"الحساب ({account.name_ar}) تجميعي — لا يقبل رصيداً افتتاحياً مباشراً")
+    if not account.is_active:
+        raise OpeningBalanceError(f"الحساب ({account.name_ar}) غير نشط")
+    if account.id == clearing_id:
+        raise OpeningBalanceError(
+            f"لا يجوز إدخال رصيد افتتاحي على حساب التوازن نفسه ({account.name_ar}) — "
+            "هو سطر التوازن التلقائي، لا سطر يدوي"
+        )
+    if account.account_type in (AccountType.REVENUE, AccountType.EXPENSE):
+        raise OpeningBalanceError(
+            f"الحساب ({account.name_ar}) من نوع إيراد/مصروف — لا يجوز أن يحمل رصيداً افتتاحياً "
+            "(يشوّه قياس ربحية الفترة الحالية؛ حسابات الإيراد/المصروف تبدأ كل فترة من صفر)"
+        )
+    return account
+
+
+def post_opening_account_balances(
+    session: Session, entries: list[OpeningBalanceLineInput], opening_date: date,
+) -> JournalEntry:
+    """
+    3B-1 حصراً — راجع رأس الملف. يبني قيداً واحداً POSTED مباشرة عبر
+    add_manual_line()/post_manual_entry() الموجودتين فعلياً — لا منطق
+    ترحيل جديد. §9: Idempotency برفض صريح — لا تنفيذ ثانٍ لنفس النطاق.
+    """
+    already_posted = session.get(Setting, OPENING_BALANCES_SETTING_KEY)
+    if already_posted is not None:
+        raise OpeningBalanceError(
+            f"الأرصدة الافتتاحية للحسابات مُرحَّلة مسبقاً بتاريخ {already_posted.value} — "
+            "لا يجوز ترحيلها مرة ثانية. للتصحيح: اعكس القيد الحالي أولاً عبر "
+            "reverse_opening_account_balances()، ثم أعد الإدخال."
+        )
+    if not entries:
+        raise OpeningBalanceError("لا يمكن ترحيل دفعة أرصدة افتتاحية فارغة — لم تُدخَل أي أسطر")
+
+    clearing_account = _get_clearing_account(session)
+    base_currency = get_base_currency(session)
+
+    for e in entries:
+        d, c = money(e.debit_foreign), money(e.credit_foreign)
+        if d > 0 and c > 0:
+            raise OpeningBalanceError(f"سطر الحساب {e.account_id}: لا يجوز مبلغ مدين ودائن معاً")
+        if d == 0 and c == 0:
+            raise OpeningBalanceError(f"سطر الحساب {e.account_id}: لازم مبلغ مدين أو دائن — لا سطر فارغ")
+
+    entry = JournalEntry(
+        entry_date=opening_date,
+        ref_no=_next_ref_no(session, "JV-OPEN"),
+        description="قيد الأرصدة الافتتاحية للحسابات",
+        source_type="opening_balance", currency_code=base_currency, exchange_rate=Decimal("1"),
+        status=JournalEntryStatus.DRAFT,
+    )
+    session.add(entry)
+    session.flush()
+
+    audit_rows: list[OpeningBalanceEntry] = []
+    for e in entries:
+        account = _validate_entry_account(session, e.account_id, clearing_account.id)
+        line_currency = e.currency_code or base_currency
+        # None يعني "يرث عملة القيد الافتراضية" (نفس نمط add_manual_line
+        # الموثَّق) — لا نمرّره صراحة إلا لو كانت عملة السطر مختلفة فعلاً
+        passed_currency = None if line_currency == base_currency else line_currency
+        add_manual_line(
+            session, entry, account_id=account.id,
+            debit=e.debit_foreign, credit=e.credit_foreign, exchange_rate=e.exchange_rate,
+            line_currency_code=passed_currency, line_exchange_rate=e.exchange_rate,
+        )
+        base_eq = money((e.debit_foreign or e.credit_foreign) * rate_(e.exchange_rate))
+        audit_rows.append(OpeningBalanceEntry(
+            journal_entry_id=entry.id, account_id=account.id, currency_code=line_currency,
+            debit_foreign=money(e.debit_foreign), credit_foreign=money(e.credit_foreign),
+            exchange_rate=e.exchange_rate, base_equivalent=base_eq, opening_date=opening_date,
+        ))
+
+    # سطر التوازن التلقائي — الفرق بالعملة الأساسية بين كل الأسطر
+    # اليدوية، على حساب Clearing المُعتمَد. القيد متوازن دائماً بالتعريف
+    # بعد هذا السطر (§6) — لا يعني أن كل مُدخَل صحيح محاسبياً، فقط أن
+    # القيد متوازن حسابياً؛ عرض الفرق للمستخدم قبل التأكيد مسؤولية
+    # الواجهة لاحقاً (3B-6)، خارج نطاق الخدمة هنا.
+    # ملاحظة تقنية: نستعلم JournalLine مباشرة (لا entry.lines) عمداً —
+    # الوصول المبكر لـentry.lines هنا كان يُخزِّن مجموعة قديمة (cache)
+    # لا تلتقط سطر التوازن المُضاف لاحقاً عبر add_manual_line (تُدرِج
+    # عبر entry_id مباشرة، لا عبر entry.lines.append())، فيفشل تحقق
+    # is_balanced() داخل post_manual_entry لاحقاً بفارق كامل قيمة السطر
+    # الأول رغم وجود السطرين فعلياً بقاعدة البيانات — بق حقيقي اكتُشف
+    # واختُبِر أثناء بناء 3B-1، لا افتراضياً.
+    from app.models import JournalLine as _JournalLine
+    current_lines = session.query(_JournalLine).filter_by(entry_id=entry.id).all()
+    total_debit_base = sum(money(l.debit_base) for l in current_lines)
+    total_credit_base = sum(money(l.credit_base) for l in current_lines)
+    diff = total_debit_base - total_credit_base
+    if diff != 0:
+        if diff > 0:
+            add_manual_line(session, entry, account_id=clearing_account.id, credit=diff, exchange_rate=Decimal("1"))
+        else:
+            add_manual_line(session, entry, account_id=clearing_account.id, debit=-diff, exchange_rate=Decimal("1"))
+
+    session.expire(entry, ["lines"])  # يفرض إعادة تحميل نظيفة تلتقط كل الأسطر فعلياً قبل post_manual_entry
+    post_manual_entry(session, entry)  # يفرض is_balanced() + كل تحققات journal_edit.py الحالية، لا تكرار
+
+    for row in audit_rows:
+        session.add(row)
+    session.add(Setting(key=OPENING_BALANCES_SETTING_KEY, value=str(opening_date)))
+    session.flush()
+    return entry
+
+
+def reverse_opening_account_balances(session: Session, journal_entry: JournalEntry, reversal_date: date) -> JournalEntry:
+    """يعكس قيد الأرصدة الافتتاحية للحسابات — يُعيد استخدام
+    reverse_manual_entry() الموجودة فعلياً حرفياً (لا آلية عكس جديدة)،
+    ثم يمسح Setting['opening_balances_accounts_posted_at'] فقط، للسماح
+    بإعادة الإدخال بعده مباشرة (§9). القيد الأصلي لا يُحذَف أبداً —
+    يبقى بسجل القيود دائماً، فقط يُعكَس أثره (نفس مبدأ cancel_invoice)."""
+    reversal = reverse_manual_entry(session, journal_entry, reversal_date,
+                                     description="عكس قيد الأرصدة الافتتاحية للحسابات")
+    setting_row = session.get(Setting, OPENING_BALANCES_SETTING_KEY)
+    if setting_row is not None:
+        session.delete(setting_row)
+    session.flush()
+    return reversal

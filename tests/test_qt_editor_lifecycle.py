@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Account, AccountType, Item, CostMethod, Warehouse
+from app.models import Base, Account, AccountType, Item, CostMethod, Warehouse, Setting
 from app.ui.inventory.item_list_view import ItemListView
 from app.ui.inventory.item_card_dialog import ItemCardDialog
 from app.ui.accounting.journal_voucher_form import JournalVoucherFormView, COL_CODE, COL_DEBIT
@@ -26,6 +26,11 @@ inv = Account(code="1200", name_ar="المخزون", account_type=AccountType.AS
 cogs = Account(code="5100", name_ar="تكلفة المبيعات", account_type=AccountType.EXPENSE)
 cash = Account(code="1101", name_ar="الصندوق", account_type=AccountType.ASSET)
 session.add_all([inv, cogs, cash])
+# §58: يحاكي ما يفعله app.db.open_company_db() فعلياً (مزامنة العملة
+# الأساسية من registry.db) — بلا هذا السطر ترفع get_base_currency()
+# خطأً واضحاً بدل افتراض SYP صامتاً، وهذا بالضبط السلوك المطلوب؛
+# القاعدة هنا اختبارية معزولة بلا registry.db أصلاً فنُحاكيه يدوياً.
+session.add(Setting(key="base_currency", value="SYP"))
 session.commit()
 
 captured = []

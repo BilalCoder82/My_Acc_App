@@ -44,6 +44,14 @@ REGRESSION_FILES = [
     "tests/test_comprehensive_review.py",
     "tests/test_settlement_tamper_resistance.py",
     "tests/test_ui_settlement_and_cancel.py",
+    "tests/test_ui_full_sales_lifecycle.py",
+    "tests/test_currency_lifecycle_final.py",
+    "tests/test_allow_reconciliation_enforcement.py",
+    "tests/test_account_reconciliation_rules.py",
+    "tests/test_invoice_cycle_customer_supplier.py",
+    "tests/test_phase2_migration_data_integrity.py",
+    "tests/test_base_currency_source_of_truth.py",
+    "tests/test_opening_account_balances.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

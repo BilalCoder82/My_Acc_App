@@ -12,8 +12,7 @@ Default Chart of Accounts Template
 from __future__ import annotations
 from sqlalchemy.orm import Session
 
-from app.models import Account, AccountType, Setting
-
+from app.models import Account, AccountType, AccountSubtype, Setting
 
 def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
     if session.query(Account).count() > 0:
@@ -22,8 +21,9 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
             "لو تحتاج البدء من جديد، احذف الحسابات يدوياً أولاً."
         )
 
-    def acc(code, name, atype, parent=None, is_group=False):
-        a = Account(code=code, name_ar=name, account_type=atype, parent_id=parent.id if parent else None, is_group=is_group)
+    def acc(code, name, atype, parent=None, is_group=False, subtype=AccountSubtype.GENERAL):
+        a = Account(code=code, name_ar=name, account_type=atype, parent_id=parent.id if parent else None,
+                     is_group=is_group, subtype=subtype)
         session.add(a)
         session.flush()
         return a
@@ -31,8 +31,12 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
     # 1 الأصول
     assets = acc("1", "الأصول", AccountType.ASSET, is_group=True)
     current_assets = acc("11", "الأصول المتداولة", AccountType.ASSET, assets, is_group=True)
-    cash = acc("1101", "الصندوق", AccountType.ASSET, current_assets)
-    bank = acc("1102", "البنك", AccountType.ASSET, current_assets)
+    cash = acc("1101", "الصندوق", AccountType.ASSET, current_assets, subtype=AccountSubtype.CASH)
+    bank = acc("1102", "البنك", AccountType.ASSET, current_assets, subtype=AccountSubtype.BANK)
+    # ar_parent/ap_parent مجموعتان أب فقط (is_group) — الحسابات الفعلية
+    # القابلة للتسوية هي الحسابات الفرعية لكل عميل/مورد التي تُنشَأ
+    # تلقائياً بـget_or_create_party_account (subtype=CUSTOMER/SUPPLIER
+    # وallow_reconciliation=True هناك تحديداً، لا هنا).
     ar_parent = acc("1103", "الذمم المدينة", AccountType.ASSET, current_assets, is_group=True)
     inventory = acc("1104", "المخزون", AccountType.ASSET, current_assets)
     fixed_assets = acc("12", "الأصول الثابتة", AccountType.ASSET, assets, is_group=True)
@@ -52,25 +56,25 @@ def create_default_chart_of_accounts(session: Session) -> dict[str, Account]:
 
     # 4 الإيرادات
     revenue = acc("4", "الإيرادات", AccountType.REVENUE, is_group=True)
-    sales = acc("4101", "المبيعات", AccountType.REVENUE, revenue)
+    sales = acc("4101", "المبيعات", AccountType.REVENUE, revenue, subtype=AccountSubtype.INCOME)
     acc("4102", "مردودات ومسموحات المبيعات", AccountType.REVENUE, revenue)
-    fx_gain = acc("4103", "أرباح فروقات صرف", AccountType.REVENUE, revenue)
+    fx_gain = acc("4103", "أرباح فروقات صرف", AccountType.REVENUE, revenue, subtype=AccountSubtype.OTHER)
 
     # 5 تكلفة المبيعات
     cost_group = acc("5", "تكلفة المبيعات", AccountType.EXPENSE, is_group=True)
-    cogs = acc("5101", "كلفة البضاعة المباعة", AccountType.EXPENSE, cost_group)
+    cogs = acc("5101", "كلفة البضاعة المباعة", AccountType.EXPENSE, cost_group, subtype=AccountSubtype.EXPENSE)
 
     # 6 المصروفات التشغيلية
     expenses = acc("6", "المصروفات", AccountType.EXPENSE, is_group=True)
-    acc("6101", "رواتب وأجور", AccountType.EXPENSE, expenses)
-    acc("6102", "إيجار", AccountType.EXPENSE, expenses)
-    acc("6103", "كهرباء وماء", AccountType.EXPENSE, expenses)
-    acc("6104", "مصروفات متنوعة", AccountType.EXPENSE, expenses)
+    acc("6101", "رواتب وأجور", AccountType.EXPENSE, expenses, subtype=AccountSubtype.EXPENSE)
+    acc("6102", "إيجار", AccountType.EXPENSE, expenses, subtype=AccountSubtype.EXPENSE)
+    acc("6103", "كهرباء وماء", AccountType.EXPENSE, expenses, subtype=AccountSubtype.EXPENSE)
+    acc("6104", "مصروفات متنوعة", AccountType.EXPENSE, expenses, subtype=AccountSubtype.EXPENSE)
     # حساب منفصل عن fx_gain عمداً (لا حساب مشترك) — راجع WORKFLOW.md §42.3
     # الكود 6106 وليس 6105 عمداً — 6105 مُستخدَم يدوياً بحساب فروقات صرف
     # مؤقت داخل tests/test_e2e_scenario.py (أُنشئ يدوياً قبل وجود هذه
     # الشجرة الافتراضية أصلاً)، لتفادي تصادم UNIQUE constraint.
-    fx_loss = acc("6106", "خسائر فروقات صرف", AccountType.EXPENSE, expenses)
+    fx_loss = acc("6106", "خسائر فروقات صرف", AccountType.EXPENSE, expenses, subtype=AccountSubtype.OTHER)
 
     # ربط الإعدادات تلقائياً — الفواتير تشتغل فوراً بدون إعداد يدوي إضافي
     session.add_all([

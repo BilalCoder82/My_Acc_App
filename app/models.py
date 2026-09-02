@@ -39,6 +39,24 @@ class AccountType(str, enum.Enum):
     EXPENSE = "expense"          # مصروفات
 
 
+class AccountSubtype(str, enum.Enum):
+    """تصنيف العمل الفرعي للحساب — منفصل تماماً عن AccountType (الطبيعة
+    المحاسبية أصل/خصم/... لا تحدد وحدها إن كان الحساب "عميلاً" أو
+    "مورداً" أو يسمح بالتسوية). راجع قرار Bilal الصريح: account_type
+    وحده ليس Business Rule، ورقم الحساب ليس Business Rule أيضاً — هذا
+    الحقل هو مصدر الحقيقة الوحيد لتصنيف العمل، لا استنتاجه من الكود أو
+    اسم الحساب بأي مكان بالخدمات.
+    """
+    GENERAL = "general"      # عام
+    CUSTOMER = "customer"    # عميل
+    SUPPLIER = "supplier"    # مورد
+    CASH = "cash"            # صندوق
+    BANK = "bank"            # بنك
+    EXPENSE = "expense"      # مصروف
+    INCOME = "income"        # إيراد
+    OTHER = "other"          # أخرى
+
+
 class CostMethod(str, enum.Enum):
     FIFO = "fifo"
     AVERAGE = "average"
@@ -88,6 +106,17 @@ class Account(Base):
     # وكافٍ لبنائه لاحقاً بدون أي تعديل schema إضافي — راجع WORKFLOW.md.
     currency_code: Mapped[str] = mapped_column(String(3), default="SYP")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # تصنيف العمل الفرعي (§56) — GENERAL افتراضياً لكل الحسابات القديمة
+    # (محايد، لا تسوية، لا كسر لأي سلوك حالي). NOT NULL عمداً خلافاً لـ
+    # is_cash بـInvoice: هذا تصنيف بنيوي دائم للحساب نفسه، لا حالة عابرة
+    # لعملية واحدة — لا معنى لتركه غير معروف.
+    subtype: Mapped[AccountSubtype] = mapped_column(Enum(AccountSubtype), default=AccountSubtype.GENERAL)
+    # يسمح بتسوية الفواتير — قاعدة عمل صريحة مستقلة عن subtype (قرار
+    # Bilal الصريح: subtype وحده لا يقرر، والـService تتحقق من هذا
+    # الحقل تحديداً، لا من account_type ولا من رقم الحساب). افتراضياً
+    # False حتى للحسابات المصنَّفة CUSTOMER/SUPPLIER — يجب تفعيلها
+    # صراحة، لا استنتاجها من التصنيف تلقائياً.
+    allow_reconciliation: Mapped[bool] = mapped_column(Boolean, default=False)
     # حساب لا يقبل قيود مباشرة (حساب تجميعي/أب فقط)
     is_group: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -237,6 +266,12 @@ class Invoice(Base):
     currency_code: Mapped[str] = mapped_column(String(3), default="SYP")
     exchange_rate: Mapped[float] = mapped_column(Numeric(14, 6), default=1)
     status: Mapped[InvoiceStatus] = mapped_column(Enum(InvoiceStatus), default=InvoiceStatus.DRAFT)
+    # طريقة الدفع (نقدي/آجل) — كانت اختياراً عابراً بالواجهة فقط يُقرأ
+    # لحظة الترحيل، غير مخزَّن؛ إعادة فتح مسودة كانت تُعيده لقيمة الـUI
+    # الافتراضية بصمت (§53 — اكتُشف أثناء اختبار الدورة الكاملة). Nullable
+    # عمداً: السجلات القديمة (قبل هذه الهجرة) لا تحمل قيمة معروفة، تبقى
+    # None ولا يُعاد تخمينها بأثر رجعي.
+    is_cash: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # حسم على مستوى الفاتورة كاملة — يُوزَّع نسبياً على البنود عند الحساب
     # (نسبة% أو مبلغ ثابت، نادراً ما يُستخدمان معاً؛ الاثنان محفوظان كبيانات خام)
@@ -321,6 +356,29 @@ class StockTransfer(Base):
 
 # ---------------------------------------------------------------------------
 # الإعدادات — Settings (مفتاح/قيمة بسيط لكل شركة)
+# ---------------------------------------------------------------------------
+# الأرصدة الافتتاحية للحسابات (Phase 3B-1) — سجل تدقيق فقط، لا يحل محل
+# JournalEntry/JournalLine (القيد الفعلي هو مصدر الحقيقة المحاسبية،
+# هذا الجدول يحفظ المُدخَل الأصلي كما أدخله المستخدم لغرض العرض/التدقيق)
+# ---------------------------------------------------------------------------
+
+class OpeningBalanceEntry(Base):
+    __tablename__ = "opening_balance_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"))
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    currency_code: Mapped[str] = mapped_column(String(3))
+    debit_foreign: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    credit_foreign: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    exchange_rate: Mapped[float] = mapped_column(Numeric(14, 6), default=1)
+    base_equivalent: Mapped[float] = mapped_column(Numeric(14, 2))
+    opening_date: Mapped[date] = mapped_column(Date)
+
+    journal_entry: Mapped["JournalEntry"] = relationship()
+    account: Mapped["Account"] = relationship()
+
+
 # ---------------------------------------------------------------------------
 
 class Setting(Base):

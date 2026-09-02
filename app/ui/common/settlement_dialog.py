@@ -61,26 +61,17 @@ class SettlementDialog(QDialog):
         info_layout.addWidget(QLabel(self.invoice.currency_code), 2, 0)
 
         # الرصيد المستحق يُحسَب ديناميكياً دائماً من الخدمة، لا حقل مخزَّن.
-        # ملاحظة مهمة: get_invoice_balance_due() نفسها لا تتحقق من status
-        # الفاتورة (تحسب totals فقط) — فحص DRAFT/CANCELLED صراحة هنا
-        # إلزامي قبل استدعائها، وإلا ستعرض رصيداً كاملاً زائفاً لفاتورة
-        # لم تُرحَّل أصلاً بعد. الرفض الفعلي عند التأكيد يبقى من الخدمة
-        # (_post_settlement) كطبقة حماية ثانية، لا بديلاً عن هذا الفحص.
-        if self.invoice.status == InvoiceStatus.DRAFT:
+        # get_invoice_balance_due() ترفض SettlementError الآن لأي حالة
+        # غير POSTED (قرار §52 بـsettlements.py — invariant مركزي بالخدمة
+        # نفسها بعد مراجعة Bilal، لا فحصاً مكرَّراً هنا بالواجهة).
+        try:
+            balance_due = get_invoice_balance_due(self.session, self.invoice)
+            error = None
+            if balance_due <= 0:
+                error = f"الفاتورة {self.invoice.invoice_no} مُسوَّاة بالكامل — لا رصيد مستحق"
+        except SettlementError as e:
             balance_due = Decimal("0")
-            error = f"الفاتورة {self.invoice.invoice_no} غير مرحّلة بعد — لا يجوز تسويتها"
-        elif self.invoice.status == InvoiceStatus.CANCELLED:
-            balance_due = Decimal("0")
-            error = f"الفاتورة {self.invoice.invoice_no} ملغاة — لا يجوز تسويتها"
-        else:
-            try:
-                balance_due = get_invoice_balance_due(self.session, self.invoice)
-                error = None
-                if balance_due <= 0:
-                    error = f"الفاتورة {self.invoice.invoice_no} مُسوَّاة بالكامل — لا رصيد مستحق"
-            except SettlementError as e:
-                balance_due = Decimal("0")
-                error = str(e)
+            error = str(e)
 
         balance_label = QLabel(format_currency(balance_due, self.invoice.currency_code))
         balance_label.setStyleSheet("font-weight: bold; font-size: 15px; color: #2563EB;")

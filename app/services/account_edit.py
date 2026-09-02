@@ -19,7 +19,7 @@ Account Edit Service — دليل الحسابات: إنشاء/تعديل/تفع
 from __future__ import annotations
 from sqlalchemy.orm import Session
 
-from app.models import Account, AccountType
+from app.models import Account, AccountType, AccountSubtype
 
 VALID_CURRENCIES = {"SYP", "USD", "TRY", "EUR"}
 
@@ -91,6 +91,7 @@ def create_account(
     session: Session, *, code: str, name_ar: str, account_type: AccountType,
     parent_id: int | None = None, currency_code: str = "SYP",
     is_group: bool = False, is_active: bool = True,
+    subtype: AccountSubtype = AccountSubtype.GENERAL, allow_reconciliation: bool = False,
 ) -> Account:
     code, name_ar, currency_code = _validate_common(
         session, code=code, name_ar=name_ar, account_type=account_type,
@@ -99,6 +100,7 @@ def create_account(
     account = Account(
         code=code, name_ar=name_ar, account_type=account_type, parent_id=parent_id,
         currency_code=currency_code, is_group=is_group, is_active=is_active,
+        subtype=subtype, allow_reconciliation=allow_reconciliation,
     )
     session.add(account)
     session.flush()
@@ -109,6 +111,7 @@ def update_account(
     session: Session, account: Account, *, code: str, name_ar: str,
     account_type: AccountType, parent_id: int | None, currency_code: str,
     is_group: bool, is_active: bool,
+    subtype: AccountSubtype = AccountSubtype.GENERAL, allow_reconciliation: bool = False,
 ) -> Account:
     code, name_ar, currency_code = _validate_common(
         session, code=code, name_ar=name_ar, account_type=account_type,
@@ -134,6 +137,8 @@ def update_account(
     account.currency_code = currency_code
     account.is_group = is_group
     account.is_active = is_active
+    account.subtype = subtype
+    account.allow_reconciliation = allow_reconciliation
     session.flush()
     return account
 

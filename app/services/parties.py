@@ -15,7 +15,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.models import Account, Setting
+from app.models import Account, AccountSubtype, Setting
 
 
 def _get_setting_int(session: Session, key: str) -> int:
@@ -62,6 +62,11 @@ def get_or_create_party_account(session: Session, party_name: str, is_customer: 
         currency_code=parent.currency_code,
         is_group=False,
         is_active=True,
+        # §56: كل حساب طرف يُنشَأ تلقائياً هنا يُصنَّف فعلياً ويُسمَح له
+        # بالتسوية بشكل صريح — لا اعتماداً على account_type أو رقم
+        # الحساب لاحقاً بأي مكان (قرار Bilal الصريح).
+        subtype=AccountSubtype.CUSTOMER if is_customer else AccountSubtype.SUPPLIER,
+        allow_reconciliation=True,
     )
     session.add(new_account)
     session.flush()  # لنحصل على id قبل استخدامه بالقيد مباشرة

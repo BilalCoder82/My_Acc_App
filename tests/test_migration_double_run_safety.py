@@ -17,7 +17,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Account, AccountType
 import app.migrations.alembic_runner as ar_module
-from tests._legacy_schema_helper import create_legacy_client_db
+from tests._legacy_schema_helper import create_legacy_client_db, seed_legacy_account
 
 TMP = Path("/tmp/test_double_run_safety")
 if TMP.exists():
@@ -28,8 +28,8 @@ db_path = TMP / "client.db"
 create_legacy_client_db(str(db_path))  # عميل قديم فعلي (من schema_snapshot.sql المجمَّد، لا Base.metadata الحيّة)
 engine = create_engine(f"sqlite:///{db_path}")
 s = sessionmaker(bind=engine)()
-s.add(Account(code="1101", name_ar="الصندوق", account_type=AccountType.ASSET))
-s.commit(); s.close(); engine.dispose()
+seed_legacy_account(str(db_path), "1101", "الصندوق")
+engine.dispose()
 
 call_count = {"n": 0}
 real_apply = ar_module.apply_migrations

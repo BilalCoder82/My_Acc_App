@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import Account, AccountType
 from app.migrations.alembic_runner import ensure_schema_up_to_date, _current_revision, _head_revision, _alembic_config
-from tests._legacy_schema_helper import create_legacy_client_db
+from tests._legacy_schema_helper import create_legacy_client_db, seed_legacy_account
 
 TMP = Path("/tmp/test_migration_safety_new")
 if TMP.exists():
@@ -32,12 +32,7 @@ db_path = TMP / "legacy_v1_client.db"
 # محاكاة عميل قديم قبل أي Alembic إطلاقاً — من schema_snapshot.sql
 # المجمَّد (لا Base.metadata الحيّة، راجع WORKFLOW.md §43 لسبب هذا التغيير)
 create_legacy_client_db(str(db_path))
-engine = create_engine(f"sqlite:///{db_path}")
-Session = sessionmaker(bind=engine)
-s = Session()
-s.add(Account(code="1101", name_ar="الصندوق", account_type=AccountType.ASSET))
-s.commit()
-s.close()
+seed_legacy_account(str(db_path), "1101", "الصندوق")
 print("قاعدة عميل قديمة (بلا alembic_version) بها حساب حقيقي — تحاكي الوضع الحالي فعلياً")
 
 # ننشئ migration مستقبلية حقيقية (عمود جديد) لمحاكاة تحديث لاحق للمشروع

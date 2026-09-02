@@ -42,6 +42,23 @@ def _get_setting(session: Session, key: str) -> int:
     return int(row.value)
 
 
+def get_base_currency(session: Session) -> str:
+    """
+    §58: العملة الأساسية للشركة الحالية — تُقرأ من Settings['base_currency']
+    التي تُزامَن تلقائياً من registry.db عند كل open_company_db() (راجع
+    app/db.py). هذه الدالة هي المدخل الوحيد المعتمد لأي كود محاسبي
+    يحتاج العملة الأساسية — لا "SYP" مكتوبة حرفياً بأي مكان، ولا أي
+    افتراض ضمني آخر. ترفع PostingError واضحة لو غابت (لا تفترض SYP).
+    """
+    row = session.get(Setting, "base_currency")
+    if row is None or not row.value:
+        raise PostingError(
+            "العملة الأساسية للشركة غير معروفة — لم تُزامَن من registry.db بعد "
+            "(تأكد من فتح القاعدة عبر app.db.open_company_db، لا اتصال مباشر بملف SQLite)"
+        )
+    return row.value
+
+
 def _next_ref_no(session: Session, prefix: str) -> str:
     count = session.query(JournalEntry).filter(
         JournalEntry.ref_no.like(f"{prefix}-%")

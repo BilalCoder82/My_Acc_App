@@ -61,9 +61,47 @@ def open_company_db(db_filename: str) -> Session:
     نظام PRAGMA القديم (app/migrations/runner.py) لم يُحذف — ما زال
     مُستخدَماً داخلياً لعملاء قدامى ينتقلون لـAlembic لأول مرة، ولن يُحذف
     قبل مرور فترة كافية بدون مشاكل (راجع WORKFLOW.md §33.4).
+
+    §58 (حسم base_currency — مراجعة Bilal): registry.db يبقى مصدر
+    الحقيقة الوحيد القابل للتعديل لعملة الشركة الأساسية (CompanyRecord.
+    base_currency) — لا نسخة ثانية مستقلة قابلة للتعديل داخل قاعدة
+    الشركة نفسها (قرار Bilal الصريح: هذا يخلق احتمال اختلاف مصدرين).
+    لكن محرك الترحيل (posting.py وغيره) يعمل حصراً على جلسة قاعدة
+    الشركة، بلا أي وصول لـregistry.db إطلاقاً بالتصميم الحالي — لذلك
+    نُزامِن قيمة registry.db إلى Settings الخاصة بقاعدة الشركة (مفتاح
+    "base_currency") في كل مرة تُفتَح، كـcache للقراءة فقط يُحدَّث
+    تلقائياً، لا حقلاً يُعدَّل يدوياً من داخل قاعدة الشركة. الكود
+    المحاسبي (get_base_currency أدناه) يقرأ من هذا الـcache فقط، ولا
+    يفترض SYP أو أي عملة أبداً — يرفع خطأ واضحاً لو غاب.
     """
     path = os.path.join(DATA_DIR, "companies", db_filename)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ensure_schema_up_to_date(path)
     engine = create_engine(f"sqlite:///{path}")
-    return sessionmaker(bind=engine)()
+    session = sessionmaker(bind=engine)()
+    _sync_base_currency_from_registry(session, db_filename)
+    return session
+
+
+def _sync_base_currency_from_registry(company_session: Session, db_filename: str) -> None:
+    """يُزامِن Settings['base_currency'] بقاعدة الشركة من CompanyRecord.base_currency
+    الفعلي بـregistry.db، في كل فتح — لا يُترَك ليصبح قديماً (stale) لو
+    غُيِّر لاحقاً بالـregistry. لا يفشل بصمت لو لم يوجد سجل بالـregistry
+    (عميل تجريبي أُنشئت قاعدته يدوياً خارج create_company مثلاً) — يترك
+    Settings كما هي (فارغة)، وget_base_currency() ترفع خطأ واضحاً حينها،
+    لا SYP افتراضية.
+    """
+    from app.models import Setting  # استيراد محلي لتفادي دورة استيراد مع models.py
+    registry = get_registry_session()
+    try:
+        record = registry.query(CompanyRecord).filter_by(db_filename=db_filename).first()
+        if record is None:
+            return
+        existing = company_session.query(Setting).filter_by(key="base_currency").first()
+        if existing is None:
+            company_session.add(Setting(key="base_currency", value=record.base_currency))
+        elif existing.value != record.base_currency:
+            existing.value = record.base_currency
+        company_session.commit()
+    finally:
+        registry.close()

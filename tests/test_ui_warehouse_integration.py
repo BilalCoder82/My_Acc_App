@@ -22,6 +22,7 @@ from app.models import Base, CostMethod, Warehouse, JournalLine
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
 from app.ui.sales.invoice_form import SalesInvoiceFormView
+from app.ui.sales.return_form import SalesReturnInvoiceFormView
 from app.ui.purchases.invoice_form import PurchaseInvoiceFormView
 
 today = datetime.date.today()
@@ -157,4 +158,72 @@ check("لم تُنشأ فاتورة فعلياً بلا اختيار مستود�
 print()
 print("=" * 70)
 print(f"✅ التكامل الكامل UI→Invoice→Posting→InventoryMovement→COGS نجح ({len(results)} تحقّقاً)")
+print("=" * 70)
+
+# =====================================================================
+# اختبار إضافي (طلب Bilal صراحة): شراء جديد بمستودع A لا يغيّر متوسط B،
+# ثم مرتجع مرتبط يرث نفس مستودع الفاتورة الأصلية ويُقفَل عليه
+# =====================================================================
+print()
+print("== شراء إضافي بمستودع A بسعر مختلف (1,200) — يجب ألا يمسّ متوسط B إطلاقاً ==")
+purchase_form_a2 = PurchaseInvoiceFormView(session=session, invoice_id=None)
+idx_a3 = purchase_form_a2.warehouse_combo.findData(wh_a.id)
+purchase_form_a2.party_edit.setText("مورد A ثانٍ")
+purchase_form_a2.warehouse_combo.setCurrentIndex(idx_a3)
+fill_line(purchase_form_a2, 0, "UIWH-1", "50", "1200")
+purchase_form_a2._recalculate_totals()
+purchase_form_a2.invoice_no_edit.setText("UIWH-PA2")
+purchase_form_a2._post()
+check("الشراء الإضافي بمستودع A رُحِّل فعلياً", purchase_form_a2.invoice.status.value == "posted")
+
+# متوسط A الجديد المتوقع: (90 وحدة متبقية من الشراء الأول @1,000 + 50 @1,200)
+# / 140 — نتحقق منه عبر بيع جديد من A فقط، ونتأكد بيع من B غير متأثر إطلاقاً
+from app.services.item_queries import get_item_stock_summary
+avg_a_after = get_item_stock_summary(session, item.id, warehouse_id=wh_a.id).average_cost
+avg_b_after = get_item_stock_summary(session, item.id, warehouse_id=wh_b.id).average_cost
+check("متوسط B ما زال 9,000 بالضبط (لم يتأثر بشراء A الجديد إطلاقاً)",
+      avg_b_after == D_("9000"), f"actual={avg_b_after}")
+check("متوسط A تغيّر فعلياً بعد الشراء الإضافي (لم يتجمّد)",
+      avg_a_after != D_("1000"), f"actual={avg_a_after}")
+
+sale_form_b2 = SalesInvoiceFormView(session=session, invoice_id=None)
+idx_b3 = sale_form_b2.warehouse_combo.findData(wh_b.id)
+sale_form_b2.party_edit.setText("عميل B ثانٍ")
+sale_form_b2.warehouse_combo.setCurrentIndex(idx_b3)
+fill_line(sale_form_b2, 0, "UIWH-1", "5", "12000")
+sale_form_b2._recalculate_totals()
+sale_form_b2.invoice_no_edit.setText("UIWH-SB2")
+sale_form_b2._post()
+cogs_lines_b2 = session.query(JournalLine).filter_by(
+    entry_id=sale_form_b2.invoice.journal_entry_id, account_id=coa["cogs"].id
+).all()
+cogs_b2_total = sum(D_(str(l.debit_base)) for l in cogs_lines_b2)
+check("بيع جديد من B بعد شراء A الإضافي: COGS = 5×9,000 بالضبط (B معزول تماماً عن A)",
+      cogs_b2_total == D_("45000"), f"actual={cogs_b2_total}")
+
+print("== مرتجع مرتبط بفاتورة بيع A — يجب أن يرث مستودع A ويُقفَل عليه ==")
+return_form_a = SalesReturnInvoiceFormView(session=session, invoice_id=None)
+return_form_a.original_ref_edit.setText(sale_form_a.invoice.invoice_no)
+return_form_a._load_from_original()
+check("المرتجع ورث warehouse_id = A فعلياً من الفاتورة الأصلية",
+      return_form_a._selected_warehouse_id() == wh_a.id)
+check("المستودع مُقفَل بالواجهة على المرتجع المرتبط (لا يمكن تغييره)",
+      not return_form_a.warehouse_combo.isEnabled())
+# إرجاع كمية جزئية (5 من أصل 10) للتأكد أن التعديل اليدوي على الكمية يعمل
+return_form_a.grid.setItem(0, 2, QTableWidgetItem("5"))
+return_form_a._recalculate_totals()
+return_form_a.invoice_no_edit.setText("UIWH-RETA")
+return_form_a._post()
+check("المرتجع رُحِّل فعلياً", return_form_a.invoice.status.value == "posted")
+check("Invoice.warehouse_id للمرتجع = A بالضبط (نفس الأصلية)",
+      return_form_a.invoice.warehouse_id == wh_a.id)
+return_movement = session.query(InventoryMovement).filter_by(
+    source_type="sales_return", source_id=return_form_a.invoice.id
+).first()
+check("حركة مخزون المرتجع فعلياً بمستودع A وبكمية 5 (اتجاه عكسي IN)",
+      return_movement.warehouse_id == wh_a.id and return_movement.quantity == D_("5"))
+
+print()
+print("=" * 70)
+print(f"✅ اختبار عزل المستودعات الكامل (شراء إضافي + مرتجع مرتبط) نجح — {len(results)} تحقّقاً إجمالياً")
 print("=" * 70)

@@ -428,6 +428,11 @@ class BaseDocumentFormView(QWidget):
         self.party_edit.setText(inv.party_name)
         self.currency_combo.setCurrentText(inv.currency_code)
         self.exchange_rate_spin.setValue(float(inv.exchange_rate))
+        # طريقة الدفع: تُستعاد من القيمة المخزَّنة إن وُجدت (§53). السجلات
+        # القديمة (قبل هذه الهجرة) تحمل None — تبقى على افتراض الـUI
+        # القديم ("نقدي" أول عنصر بالـComboBox) عمداً، لا تخمين بأثر رجعي.
+        if inv.is_cash is not None:
+            self.is_cash_combo.setCurrentText("نقدي" if inv.is_cash else "آجل")
         is_linked_return = self.is_return and bool(inv.original_invoice_id)
         self._set_warehouse(inv.warehouse_id, locked=is_linked_return)
         if self.is_return and inv.original_invoice_id:
@@ -458,7 +463,7 @@ class BaseDocumentFormView(QWidget):
             "color: white; font-weight: bold; font-size: 12px;"
         )
         is_posted = self.invoice is not None and self.invoice.status == InvoiceStatus.POSTED
-        widgets = [self.date_edit, self.party_edit, self.currency_combo, self.exchange_rate_spin]
+        widgets = [self.date_edit, self.party_edit, self.currency_combo, self.exchange_rate_spin, self.is_cash_combo]
         for widget in widgets:
             widget.setEnabled(not is_posted)
         # المستودع: مقفل أيضاً لو مرتجع مرتبط بمستند أصلي (بصرف النظر عن
@@ -710,13 +715,15 @@ class BaseDocumentFormView(QWidget):
                 exchange_rate=Decimal(str(self.exchange_rate_spin.value())),
                 original_invoice_id=getattr(self, "_original_invoice_id", None),
                 warehouse_id=self._selected_warehouse_id(),
+                is_cash=(self.is_cash_combo.currentText() == "نقدي"),
             )
             self.session.add(self.invoice)
             self.session.flush()
         else:
-            # مسودة موجودة يُعاد حفظها — نُزامن المستودع من الـComboBox
-            # دائماً (قد يكون المستخدم عدّله قبل إعادة الحفظ)
+            # مسودة موجودة يُعاد حفظها — نُزامن المستودع وطريقة الدفع من
+            # الـUI دائماً (قد يكون المستخدم عدّلهما قبل إعادة الحفظ)
             self.invoice.warehouse_id = self._selected_warehouse_id()
+            self.invoice.is_cash = (self.is_cash_combo.currentText() == "نقدي")
 
         for line in list(self.invoice.lines):
             self.session.delete(line)

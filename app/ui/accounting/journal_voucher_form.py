@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models import JournalEntry, JournalEntryStatus
 from app.services.journal_edit import add_manual_line, post_manual_entry, JournalEditError
+from app.services.posting import get_base_currency
 from app.services.account_queries import list_postable_accounts
 from app.ui.common.numeric_delegate import NumericGridDelegate, PlainTextGridDelegate, format_currency
 from app.ui.common.currency_combo_delegate import CurrencyComboDelegate
@@ -599,7 +600,11 @@ class JournalVoucherFormView(QWidget):
             total_debit_base += db
             total_credit_base += cb
 
-        base_currency = "SYP"  # عملة الشركة الأساسية — التوازن دائماً بها
+        # §58: لا "SYP" مكتوبة حرفياً — العملة الأساسية الفعلية للشركة
+        # الحالية عبر get_base_currency() (Settings المُزامَنة من
+        # registry.db)، لا افتراضاً ثابتاً كان يكسر أي شركة عملتها
+        # الأساسية ليست SYP فعلياً.
+        base_currency = get_base_currency(self.session)
         self.debit_total_label.setText(format_currency(total_debit_base, base_currency))
         self.credit_total_label.setText(format_currency(total_credit_base, base_currency))
         diff = total_debit_base - total_credit_base

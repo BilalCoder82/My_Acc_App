@@ -16,7 +16,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.models import Invoice, InvoiceKind, InvoiceStatus, JournalEntry, JournalEntryStatus, Settlement
+from app.models import Invoice, InvoiceKind, InvoiceStatus, JournalEntry, JournalEntryStatus, Settlement, Account, AccountSubtype
 from app.services.money import D, money
 from app.services.invoice_calc import compute_invoice_totals
 from app.services.posting import _jline, _jline_base, _get_setting
@@ -33,6 +33,17 @@ def _invoice_receivable_or_payable_account_id(session: Session, invoice: Invoice
     party_name (قد لا يطابق الحساب الفعلي المُستخدَم لو تغيّر الإعداد
     لاحقاً). إن كان هذا الحساب هو الصندوق الافتراضي نفسه، فالفاتورة
     نقدية أصلاً ولا رصيد مستحق للتسوية.
+
+    §56 (مُصحَّح — راجع مراجعة Bilal التالية): التحقق هنا شرطان معاً، لا
+    شرط واحد — يطابق حرفياً تصميمه الأصلي ("عند اختيار حساب: إذا كان
+    Customer/Supplier وallow_reconciliation=True يظهر تسوية الفواتير").
+    الإصدار السابق كان يتحقق من allow_reconciliation فقط ويتجاهل
+    subtype تماماً — ثغرة حقيقية: كانت تسمح (نظرياً) بتفعيل التسوية على
+    حساب Cash/Expense لو فُعِّل allow_reconciliation عليه خطأً، ولا
+    تُطبِّق مطلب Bilal الصريح لاحقاً "تغيير subtype من Customer إلى
+    General يجب أن ينعكس على صلاحية التسوية". الآن: subtype يجب أن يكون
+    CUSTOMER أو SUPPLIER تحديداً، وallow_reconciliation=True معاً —
+    كلاهما إلزامي، ولا اعتماد على account_type ولا رقم الحساب مطلقاً.
     """
     if invoice.journal_entry_id is None:
         raise SettlementError(f"الفاتورة {invoice.invoice_no} غير مرحّلة — لا رصيد للتسوية")
@@ -43,12 +54,38 @@ def _invoice_receivable_or_payable_account_id(session: Session, invoice: Invoice
         raise SettlementError(
             f"الفاتورة {invoice.invoice_no} نقدية (سُدِّدت بالكامل وقت الترحيل) — لا رصيد مستحق للتسوية"
         )
+    account = session.get(Account, first_line.account_id)
+    if account is None or account.subtype not in (AccountSubtype.CUSTOMER, AccountSubtype.SUPPLIER):
+        raise SettlementError(
+            f"الحساب المرتبط بفاتورة {invoice.invoice_no} "
+            f"({account.name_ar if account else '?'}) ليس عميلاً أو مورداً (subtype) — لا تسوية له"
+        )
+    if not account.allow_reconciliation:
+        raise SettlementError(
+            f"الحساب المرتبط بفاتورة {invoice.invoice_no} ({account.name_ar}) "
+            "غير مصرَّح له بالتسوية (allow_reconciliation=False) — راجع بطاقة الحساب"
+        )
     return first_line.account_id
 
 
 def get_invoice_balance_due(session: Session, invoice: Invoice) -> Decimal:
     """الرصيد المستحق بعملة الفاتورة نفسها — يُحسَب ديناميكياً دائماً،
-    لا من حقل مخزَّن (راجع WORKFLOW.md §42.1)."""
+    لا من حقل مخزَّن (راجع WORKFLOW.md §42.1).
+
+    قرار §52 (بعد مراجعة Bilal): invariant الحالة (POSTED فقط) يُفرَض
+    هنا صراحة، وليس تركه لكل مستدعٍ. السبب: "رصيد مستحق" مفهوم لا معنى
+    له فعلياً قبل الترحيل — لا قيد محاسبي وُلِد بعد، فلا "رصيد" حقيقي
+    ليُحسَب أصلاً، مهما كان رقم totals.grand_total صحيحاً حسابياً. هذا
+    يطابق تماماً السلوك الموجود مسبقاً بـ_invoice_receivable_or_payable_account_id
+    أعلاه (ترفض invoice.journal_entry_id is None بنفس المنطق) — كان
+    غيابه هنا فجوة اتساق حقيقية اكتُشفت بالاختبار، لا تصميماً مقصوداً.
+    كل مستدعٍ (UI أو خدمة) يحصل على هذا الضمان تلقائياً الآن، بدل
+    الاعتماد على كل مستدعٍ ليتحقق بنفسه.
+    """
+    if invoice.status != InvoiceStatus.POSTED:
+        raise SettlementError(
+            f"الفاتورة {invoice.invoice_no} غير مرحّلة (POSTED) — لا مفهوم لرصيد مستحق قبل الترحيل"
+        )
     totals = compute_invoice_totals(invoice)
     return totals.grand_total - _sum_settlements(session, invoice.id)
 
