@@ -331,7 +331,7 @@ shutil.rmtree(TMP)
 # =====================================================================
 # 11) رد فعل Bilal — ثلاث نقاط تقنية دقيقة تحتاج إثباتاً صريحاً، لا وصفاً
 # =====================================================================
-print("\n== 11) Transaction boundaries + rollback + عكس يحافظ على سجل التدقيق + DB-level uniqueness ==")
+print("\n== 11) Transaction boundaries + rollback + عكس يحافظ على السجل التفصيلي + DB-level uniqueness ==")
 from app.models import OpeningBalanceEntry
 from sqlalchemy.exc import IntegrityError
 
@@ -369,16 +369,17 @@ check("إعادة المحاولة بعد rollback نجحت بلا أي أثر �
       entry11.status == JournalEntryStatus.POSTED and len(entry11.lines) == 2)
 
 # 11-ب) reverse_manual_entry لا تلمس OpeningBalanceEntry إطلاقاً — سجل
-# التدقيق يبقى مرتبطاً بالقيد الأصلي (لا القيد العكسي)، لا يُحذَف ولا يُنقَل
+# السجل التفصيلي (Opening Balance Detail Record) يبقى مرتبطاً بالقيد
+# الأصلي (لا القيد العكسي)، لا يُحذَف ولا يُنقَل
 audit_before_reversal = s11.query(OpeningBalanceEntry).filter_by(journal_entry_id=entry11.id).all()
-check("سجل تدقيق واحد فعلي مرتبط بالقيد الأصلي قبل العكس", len(audit_before_reversal) == 1)
+check("سجل تفصيلي واحد فعلي مرتبط بالقيد الأصلي قبل العكس", len(audit_before_reversal) == 1)
 reversal11 = reverse_opening_account_balances(s11, entry11, datetime.date(2026, 1, 5))
 s11.commit()
 audit_after_reversal = s11.query(OpeningBalanceEntry).filter_by(journal_entry_id=entry11.id).all()
-check("بعد العكس: سجل التدقيق ما زال مرتبطاً بالقيد الأصلي بالضبط (لم يُحذَف، لم يُنقَل للقيد العكسي)",
+check("بعد العكس: السجل التفصيلي ما زال مرتبطاً بالقيد الأصلي بالضبط (لم يُحذَف، لم يُنقَل للقيد العكسي)",
       len(audit_after_reversal) == 1 and audit_after_reversal[0].id == audit_before_reversal[0].id)
 audit_on_reversal_entry = s11.query(OpeningBalanceEntry).filter_by(journal_entry_id=reversal11.id).count()
-check("لا سجل تدقيق جديد وُلِد للقيد العكسي نفسه (العكس ليس رصيداً افتتاحياً جديداً)",
+check("لا سجل تفصيلي جديد وُلِد للقيد العكسي نفسه (العكس ليس رصيداً افتتاحياً جديداً)",
       audit_on_reversal_entry == 0)
 
 # 11-ج) uniqueness/idempotency: Setting.key عمود PRIMARY KEY فعلياً —
