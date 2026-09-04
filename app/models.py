@@ -172,7 +172,7 @@ class InventoryMovement(Base):
     quantity: Mapped[float] = mapped_column(Numeric(14, 3))
     unit_cost: Mapped[float] = mapped_column(Numeric(14, 4))  # كلفة الوحدة وقت الحركة
     movement_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    source_type: Mapped[str] = mapped_column(String(30))   # 'sales_invoice' / 'purchase_invoice' / 'opening_balance'
+    source_type: Mapped[str] = mapped_column(String(30))   # 'sales_invoice' / 'purchase_invoice' / 'opening_balance' / 'opening_inventory'
     source_id: Mapped[int | None] = mapped_column(Integer)
     note: Mapped[str | None] = mapped_column(Text)
 
@@ -383,6 +383,33 @@ class OpeningBalanceEntry(Base):
 
     journal_entry: Mapped["JournalEntry"] = relationship()
     account: Mapped["Account"] = relationship()
+
+
+class OpeningInventoryEntry(Base):
+    """سجل تفصيلي (Detail Record) للأرصدة الافتتاحية للمخزون — Phase 3B-2.
+    ليس مصدر الحقيقة المحاسبية (JournalEntry/JournalLine و
+    InventoryMovement هما المصدر)، فقط يحتفظ بما أدخله المستخدم أصلاً
+    لكل سطر (مادة+مستودع)، ويربطه مباشرة بالحركة الفعلية الناتجة عنه
+    (inventory_movement_id) — إضافة عن نمط OpeningBalanceEntry بـ3B-1،
+    لأن كل سطر هنا يُنتِج حركة مخزون منفصلة فعلياً."""
+    __tablename__ = "opening_inventory_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"))
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    inventory_movement_id: Mapped[int] = mapped_column(ForeignKey("inventory_movements.id"))
+    quantity: Mapped[float] = mapped_column(Numeric(14, 3))
+    unit_cost_foreign: Mapped[float] = mapped_column(Numeric(14, 4))
+    currency_code: Mapped[str] = mapped_column(String(3))
+    exchange_rate: Mapped[float] = mapped_column(Numeric(14, 6), default=1)
+    unit_cost_base: Mapped[float] = mapped_column(Numeric(14, 4))
+    opening_date: Mapped[date] = mapped_column(Date)
+
+    journal_entry: Mapped["JournalEntry"] = relationship()
+    item: Mapped["Item"] = relationship()
+    warehouse: Mapped["Warehouse"] = relationship()
+    inventory_movement: Mapped["InventoryMovement"] = relationship()
 
 
 # ---------------------------------------------------------------------------

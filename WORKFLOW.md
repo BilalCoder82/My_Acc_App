@@ -2459,3 +2459,136 @@ Bilal أبلغ مرتين متتاليتين أن النسخة التي يراه
 إرسال نسخة جديدة من الملفين بشكل صريح ومستقل (لا داخل zip فقط) لتقليل
 احتمال هذا الالتباس — Bilal يحتاج التحقق من كونه يفتح أحدث نسخة
 مُرسَلة فعلياً، لا نسخة مخزَّنة لديه من رسالة سابقة.
+
+---
+
+## §67 — Phase 3B-2 مُنفَّذة ومُختبَرة
+
+كل ما يلي شُغِّل فعلياً بهذه البيئة (سكربتات حقيقية عبر `subprocess`
+وتشغيل مباشر، لا وصف نظري) — لا نتيجة أدناه "متوقَّعة"، كل رقم نتيجة
+تشغيل فعلي موثَّق بالمحادثة المقابلة:
+
+**الكود:**
+- `OpeningInventoryEntry` أُضيف بـ`app/models.py` (سجل تفصيلي، نفس دور
+  `OpeningBalanceEntry` بـ3B-1 — لا يستبدل `JournalEntry`/`InventoryMovement`
+  كمصدر حقيقة).
+- Migration `c2d6b4a9f1e7_add_opening_inventory_entries.py` — جدول
+  `opening_inventory_entries` بالحقول العشرة المطلوبة بالمواصفة، FKs
+  إلى `journal_entries`/`items`/`warehouses`/`inventory_movements`.
+  لا هجرة أخرى لنفس الغرض.
+- `post_opening_inventory()` و`reverse_opening_inventory()` أُنفِّذتا
+  بالكامل بـ`app/services/opening_balances.py` — راجَعتُ التنفيذ بنداً
+  بنداً مقابل القيود الـ16 بـ`PHASE3B2_DESIGN_SPEC.md` §1: **PASS على
+  الـ16 كلها** (#1 warehouse إلزامي — dataclass، لا Optional، لا
+  fallback؛ #2 تحقق item/warehouse نشطين؛ #3 quantity>0؛ #4
+  unit_cost>=0 مع قبول صريح للصفر؛ #5 تخزين unit_cost_base بالعملة
+  الأساسية؛ #6 قيمة السطر = quantity×unit_cost_base بالضبط؛ #7-8
+  InventoryMovement حقيقية + source_type="opening_inventory" لكل من
+  القيد والحركة معاً، source_id=journal_entry.id؛ #9 لا استدعاء
+  لـ_average_cost()/get_item_stock_summary() أثناء الإدخال؛ #10 فحص
+  التكرار بمفتاح (item_id,warehouse_id) معاً؛ #11 Idempotency بـSetting
+  على مستوى الشركة كاملة؛ #12 لا commit/rollback داخل الخدمة، rollback
+  ذرّي كامل مُختبَر؛ #13 لا COGS ولا Revenue — طرفان فقط
+  (Inventory/Clearing)؛ #14 نفس Clearing Account المُعتمَد بـ3B-1
+  حرفياً (`opening_balance_clearing_account_id`)؛ #15 بيع لاحق يستخدم
+  تكلفة الافتتاح تلقائياً عبر محرك المتوسط الموجود بلا كود إضافي؛ #16
+  migration + reopen فعلي مُختبَران).
+- `set_item_opening_balance()` **حُذفت نهائياً** من `opening_balances.py`
+  — لا مسار قديم متبقٍّ. تحقَّق `grep` مباشر: لا استدعاء إنتاجي واحد
+  متبقٍّ بأي ملف، فقط ذكرها التاريخي بالتوثيق (هذا الملف،
+  `PHASE3B2_DESIGN_SPEC.md`) وبتعليق توضيحي بـ`test_full_inventory_lifecycle.py`.
+- الاستدعاءات القديمة الأربعة (بثلاثة ملفات اختبار) نُقلت لـ
+  `post_opening_inventory()`:
+  - `test_e2e_scenario.py`: أثر محاسبي حقيقي جديد — حقوق الملكية
+    ارتفعت فعلياً لـ500,300,000 (رأس المال 500,000,000 + قيمة المخزون
+    الافتتاحي 300,000) لأن القيد الافتتاحي أصبح يُنشَأ فعلياً الآن
+    (لم يكن يُنشَأ إطلاقاً بالدالة القديمة). أثبتُّه رقمياً بتشغيل
+    الاختبار فعلياً، لا افتراضاً.
+  - `test_full_inventory_lifecycle.py`: كان يبني `JournalEntry` يدوياً
+    بعد الدالة القديمة لتعويض غياب القيد المحاسبي منها — حُذف ذلك الكود
+    اليدوي بالكامل لأن `post_opening_inventory()` تفعله بنفسها الآن؛
+    الاختبار يفحص المسار الحقيقي post_opening_inventory→JournalEntry→
+    InventoryMovement→Average Cost→Sale→COGS عبر Oracle مستقل
+    (`InventoryLedgerOracle`) لا يستدعي أي كود إنتاجي لحساب القيمة
+    المتوقَّعة.
+  - `test_accounting_edge_cases.py`: استدعاءان — الأول (حالة #2،
+    اختبار تحديث المتوسط المرجَّح) نُقل مباشرة؛ الثاني كان بلا أثر فعلي
+    على نتيجة الاختبار أصلاً (ملفوف بـ`try/except` عام، لا شيء لاحقاً
+    يتحقق من أثره) — وُثِّق ذلك صراحة بدل حذفه بصمت.
+
+**unit_cost=0** (نقطة حساسة راجعها Bilal مرتين): مُختبَر بعمق — دفعة
+بسطرين (أحدهما تكلفته صفر، الآخر لا)، أُثبت أن القيد بقي متوازناً، أن
+عدد أسطر القيد = 2 بالضبط (Dr المادة غير الصفرية + Cr Clearing — لا
+سطر ثالث مخفي بقيمة صفر للمادة الأخرى)، أن `InventoryMovement` للمادة
+صفرية التكلفة موجودة فعلاً بكمية صحيحة، وأن `opening_inventory_entries`
+يحتفظ بسجلها التفصيلي رغم غياب أي أثر بدفتر الأستاذ.
+
+**Oracle مستقل**: كل قيمة متوقَّعة بالاختبار محسوبة يدوياً
+(`quantity × unit_cost_base` مباشرة بقيم Decimal حرفية، أو
+`InventoryLedgerOracle` بـ`test_full_inventory_lifecycle.py`) — لا
+استدعاء لـ`post_opening_inventory()`/`_average_cost()`/
+`get_item_stock_summary()` لحساب أي قيمة متوقَّعة بأي اختبار.
+
+**Warehouse isolation**: مادة واحدة بمستودعين مختلفين، تكلفتان مختلفتان
+تماماً (5 مقابل 20)، بيع من كل منهما يستخدم متوسط مستودعه فقط —
+COGS منفصلان بالضبط، بلا تداخل.
+
+**Weighted Average بعد Opening+Purchase**: Opening 100@5 → Purchase
+100@10 → المتوسط = (100×5+100×10)/200 = 7.5 بالضبط → بيع 20 →
+COGS=150 بالضبط (Oracle مستقل يحسب هذا الرقم مباشرة). يثبت أن الافتتاح
+يدخل فعلياً بمحرك المتوسط المرجَّح الموجود، لا معاملة استثنائية.
+
+**rollback**: دفعة بثلاثة أسطر، السطر الثاني بمادة غير موجودة → فشل
+ذرّي كامل → صفر `InventoryMovement`/`JournalEntry`/`opening_inventory_entries`
+بعد `session.rollback()` من المُستدعي، لا `Setting` قفل خطأً، إعادة
+المحاولة الصحيحة تنجح نظيفة.
+
+**idempotency**: محاولة ثانية للدفعة (حتى بمادة جديدة كلياً لم تُذكَر
+بالأولى) تُرفَض، والكمية لا تتضاعف.
+
+**reopen**: إغلاق فعلي (`session.close()` + `engine.dispose()`) وفتح
+اتصال جديد تماماً بنفس ملف قاعدة البيانات — القيد، الحركة، ميزان
+المراجعة، واستعلام المخزون كلها سليمة بعد إعادة الفتح.
+
+**GL ↔ Inventory reconciliation**: اختباران منفصلان (تصحيح Bilal §65
+نقطة #1) — معزول (قبل أي حركة أخرى: رصيد حساب المخزون بميزان المراجعة
+= قيمة الافتتاح بالضبط) وأثر القيد نفسه (`debit_base == quantity ×
+unit_cost_base` لكل سطر، صحيح دائماً بصرف النظر عن حركات لاحقة).
+
+**reverse — الحالات الثلاث المطلوبة صراحة**:
+1. Opening فقط بلا بيع لاحق → reverse ينجح، الكمية تعود لصفر، القفل
+   يُزال، إعادة الإدخال تنجح.
+2. Opening + بيع POSTED لاحق من نفس (item, warehouse) اعتمد على تكلفة
+   الافتتاح → reverse يُرفَض صراحة بـ`OpeningBalanceError`.
+3. Opening بمستودع A فقط (لا B بنفس الدفعة) + بيع لاحق بمستودع B منفصل
+   تماماً (رصيده من مصدر آخر لا علاقة له) → reverse لـA ينجح، B لا يتأثر
+   إطلاقاً. مُختبَر صراحة كحالة مستقلة (§4، Case 3).
+   إضافياً: قيد بمستودعين A/B بنفس الدفعة، بيع لاحق من A فقط → عكس
+   القيد **كاملاً** يُرفَض (القيد وحدة محاسبية واحدة، لا عكس جزئي لسطر
+   دون آخر بنفس المستند).
+   وأيضاً: `reverse_opening_inventory()` ترفض صراحة قيداً من نوع
+   `source_type="opening_balance"` (قيد حسابات 3B-1) — لا تخلط النوعين
+   إطلاقاً، يطابق تصحيح §65 نقطة #3.
+
+**عدم خلط 3B-1/3B-2**: تحقَّق `grep` مباشر — `source_type="opening_balance"`
+لا يزال يُستخدَم حصراً بمسارات 3B-1 (`post_opening_account_balances`
+واختباراتها + القيود اليدوية المشابهة بملفات الاختبار)، و
+`source_type="opening_inventory"` يظهر حصراً بمسار 3B-2. لا تداخل.
+
+**النتائج النهائية المُشغَّلة فعلياً بهذه البيئة:**
+- `tests/test_opening_inventory.py`: **54/54 PASS**
+- `python tests/run_gate.py` (مع `QT_QPA_PLATFORM=offscreen`):
+  **29/29 Regression PASS + 200/200 Fuzz PASS + gate()==True**
+- `python -m pytest tests/ -q`: **PASS** (بعد إزالة `sys.exit()` غير
+  الضروري بنهاية `test_opening_inventory.py` الذي كان يكسر آلية
+  الاستيراد الداخلية لـpytest تحديداً — لم يكن يؤثر على `run_gate.py`
+  لأنه يشغّل الملفات كسكربتات منفصلة عبر `subprocess`، لكنه كان يمنع
+  تشغيل الحزمة كاملة بـpytest مباشرة).
+
+**تنبيه صريح غير مُخفى**: بيئة العمل هذه بلا `.git` (النسخة المرفوعة
+zip لا تتضمن مجلد `.git`)، فلم يكن ممكناً تشغيل `git status`/`git diff`
+فعلياً كما طُلب — بدلاً من ذلك استُخدم `diff -rq` مباشر بين نسخة الرفع
+الأصلية والنسخة المعدَّلة، وأكَّد أن التغييرات محصورة تماماً بالملفات
+المتوقَّعة (`app/models.py`، `app/services/opening_balances.py`،
+`tests/run_gate.py`، وثلاثة ملفات اختبار قديمة، بالإضافة لملف الاختبار
+والهجرة الجديدين) — لا أي تغيير جانبي غير مقصود بأي ملف آخر.

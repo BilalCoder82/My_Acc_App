@@ -20,13 +20,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import (
     Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, InventoryMovement,
-    JournalLine, JournalEntry, JournalEntryStatus, CostMethod, Account,
+    JournalLine, JournalEntry, JournalEntryStatus, CostMethod, Account, Setting,
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
-from app.services.posting import post_purchase_invoice, post_sales_invoice
+from app.services.posting import post_purchase_invoice, post_sales_invoice, get_default_warehouse
 from app.services.returns import post_sales_return, post_purchase_return
-from app.services.opening_balances import set_item_opening_balance
+from app.services.opening_balances import post_opening_inventory, OpeningInventoryLineInput
 from app.services.journal_edit import add_manual_line, post_manual_entry
 from app.services.item_queries import get_item_stock_summary
 from app.reports.trial_balance import get_trial_balance
@@ -135,17 +135,18 @@ s.commit()
 oracle = InventoryLedgerOracle()
 
 # --- المرحلة 0: رصيد افتتاحي (50 وحدة × 8,000 SYP) ---
-set_item_opening_balance(s, item.id, quantity=D_("50"), unit_cost=D_("8000"), as_of_date=today - datetime.timedelta(days=30))
+s.add(Setting(key="base_currency", value="SYP"))
+s.add(Setting(key="opening_balance_clearing_account_id", value=str(equity_acc.id)))
 s.commit()
-# opening_balances.py لا ينشئ قيداً محاسبياً (موثَّق بالكود نفسه) — نضيفه
-# يدوياً هنا تماماً كما يفعل محاسب حقيقي، وإلا لن يتطابق دفتر الأستاذ مع المخزون
-ob_entry = JournalEntry(entry_date=today - datetime.timedelta(days=30), ref_no="OB-1",
-                         description="قيد الرصيد الافتتاحي للمخزون", currency_code="SYP",
-                         exchange_rate=D_("1"), source_type="opening_balance", status=JournalEntryStatus.DRAFT)
-s.add(ob_entry); s.flush()
-add_manual_line(s, ob_entry, coa["inventory"].id, debit=D_("400000"))  # 50×8000
-add_manual_line(s, ob_entry, equity_acc.id, credit=D_("400000"))
-post_manual_entry(s, ob_entry); s.commit()
+default_wh = get_default_warehouse(s)
+# Phase 3B-2: post_opening_inventory() ينشئ القيد المحاسبي فعلياً بنفسه
+# الآن (بخلاف set_item_opening_balance() القديمة) — لم نعد نحتاج لبناء
+# ob_entry يدوياً هنا كما كان سابقاً؛ هذا بالضبط ما كان ينقص التطابق مع
+# دفتر الأستاذ، والآن الخدمة نفسها تضمنه.
+post_opening_inventory(s, [OpeningInventoryLineInput(
+    item_id=item.id, warehouse_id=default_wh.id, quantity=D_("50"), unit_cost_foreign=D_("8000"))],
+    today - datetime.timedelta(days=30))
+s.commit()
 oracle.receive(D_("50"), D_("8000"))
 verify_against_ledger(s, item, oracle, coa["inventory"].id, coa["cogs"].id, "0) بعد الرصيد الافتتاحي")
 

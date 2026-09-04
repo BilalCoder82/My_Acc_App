@@ -52,6 +52,7 @@ REGRESSION_FILES = [
     "tests/test_phase2_migration_data_integrity.py",
     "tests/test_base_currency_source_of_truth.py",
     "tests/test_opening_account_balances.py",
+    "tests/test_opening_inventory.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

@@ -17,13 +17,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import (
     Base, Account, AccountType, Item, CostMethod, Invoice, InvoiceLine,
-    InvoiceKind, InvoiceStatus, JournalEntry, JournalEntryStatus,
+    InvoiceKind, InvoiceStatus, JournalEntry, JournalEntryStatus, Setting,
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
-from app.services.opening_balances import set_item_opening_balance
+from app.services.opening_balances import post_opening_inventory, OpeningInventoryLineInput
 from app.services.item_queries import get_item_stock_summary
-from app.services.posting import post_purchase_invoice, post_sales_invoice, PostingError
+from app.services.posting import post_purchase_invoice, post_sales_invoice, get_default_warehouse, PostingError
 from app.services.returns import post_sales_return, post_purchase_return
 from app.services.journal_edit import add_manual_line, post_manual_entry, reverse_manual_entry
 from app.services.invoice_edit import ensure_editable as ensure_invoice_editable, EditNotAllowedError
@@ -105,7 +105,14 @@ print(); print("=" * 70); print("2. بيع بعد تغيّر متوسط التك
 print("=" * 70)
 s = _fresh_session()
 coa, item = _setup_basic(s)
-set_item_opening_balance(s, item.id, quantity=100, unit_cost=D_("1000"), as_of_date=today - datetime.timedelta(days=20))
+s.add(Setting(key="base_currency", value="SYP"))
+equity2 = s.query(Account).filter_by(code="3101").first()
+s.add(Setting(key="opening_balance_clearing_account_id", value=str(equity2.id)))
+s.commit()
+default_wh2 = get_default_warehouse(s)
+post_opening_inventory(s, [OpeningInventoryLineInput(
+    item_id=item.id, warehouse_id=default_wh2.id, quantity=D_("100"), unit_cost_foreign=D_("1000"))],
+    today - datetime.timedelta(days=20))
 s.commit()
 pur = Invoice(invoice_no="P1", kind=InvoiceKind.PURCHASE, party_name="مورد",
               invoice_date=today - datetime.timedelta(days=10), currency_code="SYP", exchange_rate=1, status=InvoiceStatus.DRAFT)
@@ -310,7 +317,14 @@ sale_p = Invoice(invoice_no="SP1", kind=InvoiceKind.SALES, party_name="عميل"
 sale_p.lines = [InvoiceLine(item_id=item.id, quantity=1, unit_price=D_("100"))]
 s.add(sale_p); s.commit()
 try:
-    set_item_opening_balance(s, item.id, quantity=1, unit_cost=D_("1"))  # يحتاج مادة بلا رصيد سابق أصلاً، لكن هنا فقط لإجبار حركة قبل البيع
+    # ملاحظة Phase 3B-2: هذا الاستدعاء لم يكن يؤثر فعلياً على نتيجة هذا
+    # الاختبار أصلاً (كان بـtry/except يبتلع أي استثناء، ولا شيء لاحقاً
+    # يتحقق من أثره) — post_sales_invoice يعمل بلا مشكلة على مخزون صفري
+    # بمنهجية AVERAGE بأي حال. أُبقيه معطَّلاً بنفس السلوك الدفاعي بدل
+    # حذفه بصمت، وأوثّق أنه فعلياً بلا أثر على الاختبار.
+    default_wh11 = get_default_warehouse(s)
+    post_opening_inventory(s, [OpeningInventoryLineInput(
+        item_id=item.id, warehouse_id=default_wh11.id, quantity=D_("1"), unit_cost_foreign=D_("1"))], today)
 except Exception:
     pass
 post_sales_invoice(s, sale_p, is_cash=True); s.commit()

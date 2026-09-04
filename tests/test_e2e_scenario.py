@@ -29,7 +29,7 @@ from app.models import (
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
-from app.services.opening_balances import set_item_opening_balance
+from app.services.opening_balances import post_opening_inventory, OpeningInventoryLineInput
 from app.services.item_queries import get_item_stock_summary
 from app.services.posting import post_purchase_invoice, post_sales_invoice, get_default_warehouse
 from app.services.returns import post_sales_return, post_purchase_return
@@ -105,9 +105,15 @@ print()
 print("=" * 70)
 print("المرحلة 3: أرصدة افتتاحية")
 print("=" * 70)
-set_item_opening_balance(session, item_a.id, quantity=100, unit_cost=D("1000"), as_of_date=d0)
-set_item_opening_balance(session, item_b.id, quantity=50, unit_cost=D("2000"), as_of_date=d0)
-set_item_opening_balance(session, item_c.id, quantity=200, unit_cost=D("500"), as_of_date=d0)
+session.add(Setting(key="base_currency", value="SYP"))
+session.add(Setting(key="opening_balance_clearing_account_id", value=str(equity.id)))
+session.commit()
+default_wh = get_default_warehouse(session)
+post_opening_inventory(session, [
+    OpeningInventoryLineInput(item_id=item_a.id, warehouse_id=default_wh.id, quantity=D("100"), unit_cost_foreign=D("1000")),
+    OpeningInventoryLineInput(item_id=item_b.id, warehouse_id=default_wh.id, quantity=D("50"), unit_cost_foreign=D("2000")),
+    OpeningInventoryLineInput(item_id=item_c.id, warehouse_id=default_wh.id, quantity=D("200"), unit_cost_foreign=D("500")),
+], d0)
 session.commit()
 
 opening_capital = D("500000000")  # رأس مال افتتاحي كافٍ لتغطية كل عمليات الاختبار
