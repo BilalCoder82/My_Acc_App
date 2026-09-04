@@ -71,14 +71,32 @@ unit_cost_base = unit_cost_foreign × exchange_rate
 منفصل، نفس الرقم المُخزَّن بـ`InventoryMovement` مضروباً بالكمية.
 
 ### #7-8 حركة مخزون حقيقية + ربطها بالقيد المحاسبي
+
+**تصحيح (مراجعة Bilal — نقطة #3، مهمة وليست تفصيلاً)**: `source_type`
+لقيد الحسابات الافتتاحية بـ3B-1 هو `"opening_balance"` بالفعل (راجع
+`post_opening_account_balances()`). استخدام نفس القيمة هنا لقيد
+المخزون الافتتاحي يجعل `reverse_opening_inventory()` عاجزة عن التمييز
+بثقة بين "قيد افتتاح حسابات" و"قيد افتتاح مخزون" لو مُرِّر لها
+`JournalEntry` بالخطأ من النوع الآخر — **قيد المخزون الافتتاحي يحصل
+على `source_type` مختلف صراحة**: `"opening_inventory"`، لا
+`"opening_balance"`. هذا يُفرَّق أيضاً على `InventoryMovement.source_type`
+لنفس السبب (تمييز حركات الافتتاح عن أي حركة أخرى مستقبلية قد تتشارك
+الاسم العام).
+
 ```python
 InventoryMovement(
     item_id=..., warehouse_id=..., direction=MovementDirection.IN,
     quantity=..., unit_cost=unit_cost_base,
     movement_date=opening_date,
-    source_type="opening_balance", source_id=journal_entry.id,  # ربط صريح
+    source_type="opening_inventory", source_id=journal_entry.id,  # ربط صريح
 )
 ```
+`JournalEntry` المقابل نفسه يُنشَأ بـ`source_type="opening_inventory"`
+أيضاً (لا `"opening_balance"`) — القيمتان متطابقتان بقصد: تسمح
+بالبحث المباشر `session.query(JournalEntry).filter_by(source_type=
+"opening_inventory")` بلا حاجة لأي جدول وسيط، وتُستخدَم كفحص أول
+صريح داخل `reverse_opening_inventory()` نفسها (راجع §2 أدناه).
+
 `source_id` يشير لـ`JournalEntry.id` مباشرة — يطابق نمط `source_id`
 الحالي تماماً (بالفواتير: `source_id=invoice.id`؛ هنا لا "فاتورة"
 وسيطة، فالمرجع الطبيعي هو القيد نفسه). هذا **نفس عمود موجود فعلاً**،
@@ -173,6 +191,16 @@ def post_opening_inventory(
 
 def reverse_opening_inventory(session: Session, journal_entry: JournalEntry, reversal_date: date) -> JournalEntry:
     """
+    فحص أول إلزامي (مراجعة Bilal — نقطة #3): يجب التحقق صراحة أن
+    `journal_entry.source_type == "opening_inventory"` قبل أي خطوة
+    أخرى — يرفض `OpeningBalanceError` واضحاً غير ذلك ("هذا القيد ليس
+    قيد افتتاح مخزون"). هذا ليس تحققاً تجميلياً: `"opening_balance"`
+    (قيد حسابات 3B-1) و`"opening_inventory"` (هنا) قيمتان مختلفتان
+    عمداً بالتصميم بالضبط لتفادي تمرير قيد من النوع الخطأ لهذه الدالة
+    بالغلط — لولا هذا التمييز الصريح بقيمة `source_type` نفسها، كان
+    التحقق هنا سيحتاج منطقاً أعقد (فحص وجود سطور `opening_inventory_entries`
+    مرتبطة مثلاً)؛ التمييز بالقيمة نفسها أبسط ويكفي وحده.
+
     §2 — قرار معتمَد (Bilal): يعكس القيد (reverse_manual_entry، نفس
     آلية 3B-1) + يُنشئ حركات InventoryMovement عكسية (direction=OUT)
     لكل حركة IN أصلية بنفس الكمية والتكلفة التاريخية بالضبط (يطابق
@@ -228,9 +256,20 @@ def reverse_opening_inventory(session: Session, journal_entry: JournalEntry, rev
 2. **Warehouse isolation**: نفس Item بمستودعين مختلفين، تكلفتان
    مختلفتان تماماً — لا تداخل، بيع من كل منهما يستخدم متوسط مستودعه
    فقط (نفس نمط اختبار §55/§57 السابق، بنقطة بداية افتتاحية بدل شراء).
-3. **Historical cost after opening**: Opening Qty=100@5 → Sale Qty=20
-   → `COGS = 20×5 = 100 USD` بالضبط (Oracle مستقل، لا "current
-   purchase price" لو وُجد شراء لاحق بسعر مختلف).
+3. **Historical cost after opening — نص مُصحَّح (مراجعة Bilal — نقطة
+   #2)**: الاختبار الأصلي كان يوحي بأن البيع اللاحق يستخدم تكلفة
+   الافتتاح دائماً، وهذا غير صحيح لو وُجدت حركة IN أخرى بينهما (النظام
+   Perpetual Weighted Average، لا FIFO ولا "تجميد" لتكلفة الافتتاح).
+   **اختباران منفصلان إلزاميان بدل واحد مُبهَم**:
+   - **3-أ (بلا أي IN لاحقة)**: Opening Qty=100@5 → Sale Qty=20 (لا
+     شراء بينهما) → `COGS = 20×5 = 100 USD` بالضبط.
+   - **3-ب (مع IN لاحقة — يُثبِت الاندماج الصحيح بالمتوسط المرجَّح،
+     لا الاستبدال ولا التجاهل)**: Opening Qty=100@5 → Purchase
+     Qty=100@10 → Sale Qty=20 → متوسط جديد = `(100×5 + 100×10)/200 =
+     7.5` → `COGS = 20×7.5 = 150 USD` بالضبط (Oracle مستقل يحسب هذا
+     الرقم مباشرة، لا افتراضاً). هذا الاختبار الثاني هو الأقوى فعلياً
+     لإثبات أن الافتتاح **يدخل** في نفس محرك المتوسط المرجَّح الموجود
+     ولا يُعامَل استثناءً خاصاً بأي شكل.
 4. **Multi-item**: عدة مواد بنفس الدفعة، كل مادة بقيمتها الصحيحة
    منفصلة، القيد الإجمالي متوازن رغم تعدد الأسطر.
 5. **Multi-warehouse**: (يتقاطع مع #2) — دفعة واحدة تغطي عدة مستودعات
@@ -250,9 +289,20 @@ def reverse_opening_inventory(session: Session, journal_entry: JournalEntry, rev
 10. **Reopen database**: إغلاق وإعادة فتح فعلي (اتصال جديد تماماً) —
     الأرصدة والقيد وحركات المخزون كلها سليمة، `get_trial_balance()`
     متوازن، `get_item_stock_summary()` يعطي نفس النتيجة.
-11. **GL ↔ Inventory reconciliation**: مجموع `quantity × unit_cost_base`
-    لكل حركات الافتتاح = رصيد حساب المخزون الفعلي بميزان المراجعة
-    بالضبط — لا فرق تقريب، تحقق مباشر مقارنةً لا افتراضاً.
+11. **GL ↔ Inventory reconciliation — نص مُصحَّح (مراجعة Bilal —
+    نقطة #1)**: العبارة الأصلية ("مجموع quantity×unit_cost_base = رصيد
+    حساب المخزون بميزان المراجعة") **غير صحيحة دائماً** — لو وُجدت
+    على نفس الحساب حركات شراء/بيع لاحقة، رصيد الحساب بميزان المراجعة
+    يعكس كل هذه الحركات مجتمعة، لا قيمة الافتتاح وحدها. **الصياغة
+    الصحيحة تتطلب اختباراً معزولاً بالكامل قبل أي حركة أخرى**: على
+    قاعدة بيانات لم يُسجَّل عليها أي شراء/بيع بعد (فقط الافتتاح)، يُقارَن
+    مباشرة رصيد حساب المخزون بميزان المراجعة مع مجموع `quantity ×
+    unit_cost_base` لحركات الافتتاح فقط — يجب أن يتطابقا بالضبط بهذه
+    الحالة المعزولة تحديداً. **إضافياً**، وبمعزل عن حالة العزل: يُقارَن
+    مباشرة `entry.lines` الخاصة بحساب المخزون بالقيد الافتتاحي نفسه مع
+    القيمة المُدخَلة (`debit_base` يساوي `quantity × unit_cost_base`
+    بالضبط لكل سطر) — هذا التحقق الثاني صحيح دائماً بصرف النظر عن أي
+    حركات لاحقة، لأنه يقارن أثر القيد نفسه لا رصيد الحساب الإجمالي.
 12. **Sale after opening**: (يكرر #3 بصياغة أخرى، مُبقى منفصلاً لأنه
     الاختبار الأهم برأيك) دورة كاملة عبر UI فعلية لاحقاً بـ3B-6، وعبر
     الخدمة مباشرة الآن — بيع فعلي بعد الافتتاح يُنتِج COGS صحيحاً
