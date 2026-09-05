@@ -2592,3 +2592,125 @@ zip لا تتضمن مجلد `.git`)، فلم يكن ممكناً تشغيل `gi
 المتوقَّعة (`app/models.py`، `app/services/opening_balances.py`،
 `tests/run_gate.py`، وثلاثة ملفات اختبار قديمة، بالإضافة لملف الاختبار
 والهجرة الجديدين) — لا أي تغيير جانبي غير مقصود بأي ملف آخر.
+
+---
+
+## §68 — Phase 3B-3 مُنفَّذة ومُختبَرة: الأرصدة الافتتاحية للعملاء/الموردين + امتداد محرك التسوية
+
+راجع `PHASE3B3_DESIGN_SPEC.md` (6 جولات مراجعة متتالية قبل GREENLIGHT)
+للتصميم الكامل. هذا القسم يوثّق التنفيذ الفعلي والتحقق منه — كل رقم
+أدناه ناتج تشغيل حقيقي، لا وصف نظري.
+
+**الكود:**
+- `OpeningPartyEntry`/`OpeningPartyKind` — جدول تفصيلي مستقل لكل رصيد
+  افتتاحي لعميل/مورد، بـ`JournalEntry` مستقل به وحده (لا قيد مُجمَّع —
+  §1.5 بالمواصفة).
+- `SettlementAllocation` — جدول جديد يربط تسوية واحدة (`Settlement`)
+  بعدة أهداف (فاتورة و/أو رصيد افتتاحي) عبر Exclusive Arc
+  (`CHECK` حقيقي بقاعدة البيانات، لا انضباط تطبيق فقط).
+- `Settlement` عُدِّلت: `invoice_id` حُذف نهائياً (انتقل لـ
+  `SettlementAllocation.invoice_id`)، أُضيف `currency_code`/
+  `party_account_id` (إلزاميان)، `kind` أصبح `String(20)`
+  (يستوعب `customer_refund`/`supplier_refund`).
+- `app/services/opening_party_balances.py` (جديد) — `post_opening_party_entry()`،
+  `reverse_opening_party_entry()`، `get_opening_party_entry_balance_due()`.
+- `app/services/settlements.py` (إعادة كتابة كاملة) — `post_receipt()`/
+  `post_payment()` **بتوقيع غير مُغيَّر إطلاقاً** (Backward Compatible
+  100% مع كل استدعاءاتهما القديمة، 11 موقعاً بالمجمل بما فيها UI)،
+  تُبنَيان الآن فوق محرك مُعمَّم `_post_settlement_multi()`؛ إضافة
+  `post_receipt_allocated()`/`post_payment_allocated()` للحالة
+  الجديدة متعددة الأهداف؛ `get_party_currency_balance()` (جديدة —
+  رصيد حساب طرف بعملة واحدة محدَّدة، مستقلة عن `get_account_statement`)؛
+  `post_customer_refund()`/`post_supplier_refund()`.
+- **تصحيح تقني ميكانيكي واحد على `invoice_cancel.py`** (لا قرار
+  معماري جديد — نتيجة حتمية لانتقال `invoice_id`): الاستعلام الذي كان
+  يفحص `Settlement.filter_by(invoice_id=...)` أصبح يفحص
+  `SettlementAllocation.filter_by(invoice_id=...)`، سطر واحد، لا شيء
+  آخر بالملف.
+
+**Bug محاسبي حقيقي اكتُشف وأُصلح عبر Independent Oracle** (لا اختبار
+يعتمد على نفس دوال التطبيق): `get_party_currency_balance()` كانت
+تُرجع `foreign_balance` مساوياً للقيمة الأساسية المُدمَجة (base) بدل
+المبلغ الأجنبي الفعلي، بسبب استخدام `_jline_base()` (يفرض raw=base)
+لسطر حساب الطرف بالحالات متعددة الأسعار (Overpayment/Multi-allocation
+حيث الجزء المُخصَّص له سعر دفتري مختلف عن الجزء غير المخصَّص). صُحِّح
+بدالة جديدة `_jline_party()` تفصل raw عن base صراحة ومستقلَّين.
+**بحث شامل بكل المشروع عن نفس نمط الخطأ** (لا الأماكن التي فشل فيها
+الاختبار فقط): وُجد استخدام واحد مشابه شكلياً بـ`app/services/returns.py`
+(سطر AP بمرتجعات الشراء غير النقدية، `total_cost` بقيمة تكلفة تاريخية
+لا بعملة الفاتورة الأصلية) — **قُرِّر عدم لمسه**: سلوك قديم مستقر
+(موجود من قبل 3B-2)، خارج نطاق 3B-3 المُصرَّح به صراحة (`returns.py`
+بقائمة الملفات المحظور تعديلها بلا دليل قاطع بـ§29/§32 من المواصفة)،
+ولا يؤثر على أي مسار جديد بـ3B-3 نفسها. **قيد محدود مُوثَّق صراحة**:
+`get_party_currency_balance()` قد تُعطي `foreign_balance` غير دقيق
+لمورد له مرتجعات شراء غير نقدية مُرحَّلة على حسابه — هذا موجود
+مسبقاً بمعزل عن 3B-3، ويحتاج قراراً منفصلاً لاحقاً إن احتيج فعلياً.
+
+**Hardening (§13 بالمواصفة)**: `CHECK` لكل المبالغ/الأسعار الموجبة
+(`OpeningPartyEntry.original_amount_foreign/exchange_rate`،
+`Settlement.amount_foreign/settlement_rate`،
+`SettlementAllocation.amount_foreign`)، و`UNIQUE` على `journal_entry_id`
+لكل من `Settlement`/`OpeningPartyEntry` (علاقة 1:1 مضمونة بقاعدة
+البيانات، لا افتراضاً بالكود فقط) — بنفس الـmigration الحالية، لا
+migration إضافية. **مُختبَرة عبر مساري ORM (قاعدة طازجة) وAlembic
+(قاعدة مُرقَّاة) معاً** — لا فجوة بين الاثنين.
+
+**Migration**: `d4e8f2a6c1b3` (يبني على `c2d6b4a9f1e7` من 3B-2) — جدولان
+جديدان + تعديل `settlements` + Backfill فعلي (بيانات Settlement قديمة
+حقيقية أُدخلت عبر SQL خام بمخطط ما قبل 3B-3 المبني فعلياً عبر Alembic،
+ثم رُقِّيت) + تحقق داخلي إلزامي (`RuntimeError` صريح لو فشل التطابق)
+قبل حذف `invoice_id` — **14/14 PASS** (شمل 4 تحققات Hardening إضافية
+عبر مسار Alembic).
+
+**النتائج النهائية المُشغَّلة فعلياً — الأرقام الحقيقية بعد آخر تعديل:**
+- `test_phase3b3_migration.py`: **14/14 PASS**
+- `test_phase3b3_settlement_allocation.py`: **50/50 PASS**
+- `python tests/run_gate.py` (مع `QT_QPA_PLATFORM=offscreen`):
+  **30/30 Regression PASS + 200/200 Fuzz PASS + gate()==True**
+- `python -m pytest tests/ -q`: **PASS**
+- **فحص شامل نهائي**: صفر مرجع متبقٍّ لـ`Settlement.invoice_id` بأي
+  شكل بكل المشروع (grep شامل، لا افتراض).
+- **Backward Compatibility**: كل الاستدعاءات القديمة لـ`post_receipt`/
+  `post_payment` (11 موقعاً: 9 اختبارات + UI ملفان) تعمل بلا أي تعديل
+  على توقيعها — عدد من ملفات الاختبار احتاج تعديلاً داخلياً بسيطاً
+  (استعلام `SettlementAllocation` بدل `Settlement.invoice_id` مباشرة)
+  لأن البنية تغيّرت، لا لأن السلوك المحاسبي تغيّر.
+
+**النطاق المؤجَّل صراحة (قرار Bilal، لا نسيان)**: استخدام الرصيد الفائض
+الناتج عن دفعة زائدة كخصم مباشر بفاتورة مستقبلية — Phase 3B-3-b منفصلة
+لاحقاً (يحتاج تصميم آلية مقاصة مستقلة، خارج Exclusive Arc الحالي).
+
+---
+
+## §69 — Technical Debt مُسجَّل صراحة (Bilal): قيد `get_party_currency_balance()` مع مرتجعات الشراء غير النقدية
+
+**لا يُفتَح `returns.py` الآن — هذا توثيق فقط، ليس طلب إصلاح.**
+
+الاكتشاف (§68): سطر AP بمرتجعات الشراء غير النقدية
+(`app/services/returns.py`، دالة معالجة `purchase_return`) يُرحَّل عبر
+`_jline_base()` بقيمة `total_cost` (تكلفة تاريخية بمعيار متوسط
+التكلفة)، لا بمبلغ الفاتورة الأصلية بعملتها — مما يجعل `raw` (الخام)
+لتلك السطر = `base` دائماً، بغض النظر عن عملة الفاتورة الأصلية أو
+سعرها.
+
+**لماذا هذا مهم الآن تحديداً (لم يكن مهماً قبل 3B-3)**: قبل 3B-3، لا
+دالة إنتاجية كانت تقرأ `JournalLine.debit`/`.credit` الخام لأغراض رصيد
+طرف (`party`) — فقط `get_account_statement()` (بالعملة الأساسية حصراً)
+كان يقرأ من هذه الأسطر. الآن `get_party_currency_balance()` (المُستخدَمة
+مباشرة بـ`post_customer_refund()`/`post_supplier_refund()`) تعتمد على
+هذه القيم الخام بالضبط لحساب `foreign_balance` ولاحقاً `carrying_rate`.
+
+**الأثر العملي**: مورد له مرتجع شراء غير نقدي مُرحَّل تاريخياً على
+حسابه، ثم أرسل بضاعة/دفع زيادة لاحقاً تستدعي `post_supplier_refund()`
+— قد يحصل على `foreign_balance`/`carrying_rate` غير دقيقين بسبب هذا
+السطر التاريخي، بمعزل عن صحة أي كود بـ3B-3 نفسها (المُثبَتة بـ50/50 +
+14/14 + Independent Oracle).
+
+**القرار الحالي**: لا إصلاح الآن — `returns.py` مستقر، خارج نطاق 3B-3
+المُصرَّح به صراحة (§29/§32 بـPHASE3B3_DESIGN_SPEC.md).
+
+**الشرط الملزم للمستقبل**: أي مرحلة قادمة تتعامل مع مرتجعات الشراء غير
+النقدية، أو توسّع الاعتماد على `get_party_currency_balance()` لأغراض
+أخرى غير Refund الحالي (تقارير أعمار ديون الموردين مثلاً)، **يجب أن
+تُعيد فحص هذه النقطة تحديداً أولاً** قبل الاعتماد على الدالة بنطاق
+أوسع — لا تُفترَض دقتها الكاملة لأي مورد له تاريخ مرتجعات.

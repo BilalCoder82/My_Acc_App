@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Invoice, InvoiceStatus, InventoryMovement, MovementDirection,
-    JournalEntry, JournalEntryStatus, JournalLine, Settlement,
+    JournalEntry, JournalEntryStatus, JournalLine, SettlementAllocation,
 )
 
 
@@ -32,7 +32,10 @@ def cancel_invoice(session: Session, invoice: Invoice, cancel_date: date) -> Jou
     if invoice.status != InvoiceStatus.POSTED:
         raise CancelNotAllowedError(f"الفاتورة {invoice.invoice_no} غير مرحّلة — لا يوجد أثر لعكسه")
 
-    existing_settlements = session.query(Settlement).filter_by(invoice_id=invoice.id).count()
+    # Phase 3B-3: Settlement لم يعد يحمل invoice_id مباشرة — انتقل بالكامل
+    # لـSettlementAllocation (PHASE3B3_DESIGN_SPEC.md §1.10/§9). تصحيح
+    # ميكانيكي محتّم بقرار §1.10 نفسه، لا تغييراً معمارياً جديداً.
+    existing_settlements = session.query(SettlementAllocation).filter_by(invoice_id=invoice.id).count()
     if existing_settlements > 0:
         raise CancelNotAllowedError(
             f"الفاتورة {invoice.invoice_no} لها {existing_settlements} تسوية (قبض/دفع) مرتبطة — "

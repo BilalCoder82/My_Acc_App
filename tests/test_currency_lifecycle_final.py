@@ -19,7 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import (
-    Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, Settlement,
+    Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, Settlement, SettlementAllocation,
     JournalLine, CostMethod,
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
@@ -74,9 +74,11 @@ def run_currency_scenario(currency: str, invoice_rate: D_, rate1: D_, rate2: D_,
 
         # --- Oracle مستقل: realized FX يدوياً بلا استدعاء أي دالة بالمحرك ---
         expected_fx = (amt * rate) - (amt * original_invoice_rate)  # موجب=ربح لعميل قبضنا أكثر
-        settlement_row = session.query(Settlement).filter_by(
-            invoice_id=inv.id, kind="receipt"
-        ).order_by(Settlement.id.desc()).first()
+        # Phase 3B-3: invoice_id انتقل من Settlement إلى SettlementAllocation
+        latest_alloc = session.query(SettlementAllocation).filter_by(
+            invoice_id=inv.id
+        ).order_by(SettlementAllocation.id.desc()).first()
+        settlement_row = session.get(Settlement, latest_alloc.settlement_id)
         check(f"[{currency}] تسوية #{i}: fx_amount المخزَّن = Oracle يدوي بالضبط",
               settlement_row.fx_amount == expected_fx,
               f"stored={settlement_row.fx_amount} expected={expected_fx}")

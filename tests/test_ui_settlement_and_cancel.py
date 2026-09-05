@@ -23,7 +23,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from PySide6.QtWidgets import QApplication, QTableWidgetItem, QMessageBox, QDialog
 
-from app.models import Base, CostMethod, InvoiceStatus, Settlement
+from app.models import Base, CostMethod, InvoiceStatus, Settlement, SettlementAllocation
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
 from app.models import Warehouse
@@ -147,7 +147,7 @@ sale_form._refresh_balance_due()
 check("بعد تسوية الرصيد بالكامل: العرض = 0.00 بالضبط (لا رصيد متبقٍ)",
       "0.00" in sale_form.balance_due_label.text(),
       f"actual={sale_form.balance_due_label.text()}")
-settlements_count = session.query(Settlement).filter_by(invoice_id=sale_form.invoice.id).count()
+settlements_count = session.query(SettlementAllocation).filter_by(invoice_id=sale_form.invoice.id).count()
 check("سُجِّلت تسويتان فعلياً بقاعدة البيانات (جزئية + كاملة)", settlements_count == 2)
 
 # --- 6) رفض Cancel عند وجود Settlement مرتبطة ---
@@ -178,7 +178,7 @@ session.refresh(sale_form.invoice)
 check("الفاتورة الأولى (ذات التسويات) بقيت POSTED — لم تتأثر بإلغاء فاتورة أخرى",
       sale_form.invoice.status == InvoiceStatus.POSTED)
 check("تسويات الفاتورة الأولى ما زالت مسجَّلة (2) بلا تغيير",
-      session.query(Settlement).filter_by(invoice_id=sale_form.invoice.id).count() == 2)
+      session.query(SettlementAllocation).filter_by(invoice_id=sale_form.invoice.id).count() == 2)
 
 print()
 print("=" * 70)

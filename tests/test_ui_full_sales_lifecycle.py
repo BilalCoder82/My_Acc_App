@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from PySide6.QtWidgets import QApplication, QTableWidgetItem, QMessageBox, QDialog, QAbstractItemView
 
 from app.models import (
-    Base, CostMethod, InvoiceStatus, Settlement, JournalEntry, JournalEntryStatus,
+    Base, CostMethod, InvoiceStatus, Settlement, SettlementAllocation, JournalEntry, JournalEntryStatus,
     InventoryMovement, Warehouse, JournalLine,
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
@@ -197,10 +197,11 @@ from app.services.settlements import get_invoice_balance_due
 final_balance = get_invoice_balance_due(session, reopened.invoice)
 check("الرصيد النهائي = صفر بالضبط بعد 3 دفعات (Oracle مستقل رياضياً)",
       final_balance == D_("0"), f"actual={final_balance}")
-settlements_saved = session.query(Settlement).filter_by(invoice_id=reopened.invoice.id).all()
-check("3 سجلات Settlement فعلية بقاعدة البيانات", len(settlements_saved) == 3)
-sum_settlements = sum(D_(str(s.amount_foreign)) for s in settlements_saved)
-check("مجموع مبالغ Settlement = الإجمالي بالضبط (لا فرق تقريب متراكم)",
+settlement_allocs = session.query(SettlementAllocation).filter_by(invoice_id=reopened.invoice.id).all()
+check("3 سجلات SettlementAllocation فعلية بقاعدة البيانات (Phase 3B-3: invoice_id انتقل من Settlement)",
+      len(settlement_allocs) == 3)
+sum_settlements = sum(D_(str(a.amount_foreign)) for a in settlement_allocs)
+check("مجموع مبالغ SettlementAllocation = الإجمالي بالضبط (لا فرق تقريب متراكم)",
       sum_settlements == grand_total, f"sum={sum_settlements} vs grand_total={grand_total}")
 
 # --- تحقق مباشر من ميزان المراجعة الفعلي (Receivable) بعد التسويات ---
@@ -254,7 +255,7 @@ session.refresh(reopened.invoice)
 check("الفاتورة الأولى بقيت POSTED بلا تأثر بإلغاء الفاتورة الأخرى (عزل كامل)",
       reopened.invoice.status == InvoiceStatus.POSTED)
 check("تسويات الفاتورة الأولى ما زالت 3 بلا تغيير", len(
-    session.query(Settlement).filter_by(invoice_id=reopened.invoice.id).all()
+    session.query(SettlementAllocation).filter_by(invoice_id=reopened.invoice.id).all()
 ) == 3)
 # لا استخدام Cancel كبديل لـReturn: التأكد أن لا InventoryMovement بنوع
 # "sales_return" وُلِدت لأي من الفاتورتين (Cancel وReturn مساران منفصلان)

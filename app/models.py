@@ -318,23 +318,98 @@ class InvoiceLine(Base):
 # ---------------------------------------------------------------------------
 
 class Settlement(Base):
+    """قبض/دفع/استرداد — Phase 3B-3: أصبحت هذه الطبقة قادرة على تسوية
+    أكثر من هدف (فاتورة و/أو رصيد افتتاحي معاً) بنفس القبضة، عبر
+    SettlementAllocation أدناه. invoice_id السابق (كان NOT NULL هنا)
+    انتقل بالكامل لـSettlementAllocation.invoice_id — لا عمود مباشر
+    للفاتورة هنا بعد الآن؛ راجع get_invoice_balance_due() بـsettlements.py
+    التي تُجمِّع الآن من SettlementAllocation لا من هذا الجدول مباشرة.
+    """
     __tablename__ = "settlements"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"))
-    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"))
-    kind: Mapped[str] = mapped_column(String(10))  # "receipt" | "payment"
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"), unique=True)  # علاقة 1:1 — كل تسوية قيدها المستقل الخاص بها فقط
+    party_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))  # إلزامي — Invariant: كل allocations بنفس settlement تخص هذا الحساب بالضبط
+    kind: Mapped[str] = mapped_column(String(20))  # "receipt" | "payment" | "customer_refund" | "supplier_refund"
     settlement_date: Mapped[date] = mapped_column(Date, default=date.today)
-    # الجزء المُسوَّى من الفاتورة، بعملة الفاتورة نفسها (لا عملة القبض الفعلية)
+    currency_code: Mapped[str] = mapped_column(String(3))
+    # إجمالي القبضة/الدفعة كاملة، بعملة settlement (== عملة كل الأهداف المخصَّصة لها، مفروض بالخدمة)
     amount_foreign: Mapped[float] = mapped_column(Numeric(14, 2))
     settlement_rate: Mapped[float] = mapped_column(Numeric(14, 6))
-    # فرق الصرف الناتج عن هذه التسوية تحديداً، بالعملة الأساسية.
+    # فرق الصرف الناتج عن هذه التسوية تحديداً (مجموع كل التخصيصات)، بالعملة الأساسية.
     # موجب = ربح صرف، سالب = خسارة صرف (راجع WORKFLOW.md §42.3 للإشارة
     # حسب نوع الحساب: عميل مقابل مورد معكوسان).
     fx_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
 
-    invoice: Mapped["Invoice"] = relationship()
+    __table_args__ = (
+        CheckConstraint("amount_foreign > 0", name="ck_settlement_amount_positive"),
+        CheckConstraint("settlement_rate > 0", name="ck_settlement_rate_positive"),
+    )
+
     journal_entry: Mapped["JournalEntry"] = relationship()
+    party_account: Mapped["Account"] = relationship()
+    allocations: Mapped[list["SettlementAllocation"]] = relationship(back_populates="settlement")
+
+
+class SettlementAllocation(Base):
+    """كيف طُبِّق قبض/دفع واحد على هدف واحد (فاتورة أو رصيد افتتاحي) —
+    بيانات تشغيلية تفسيرية فقط؛ JournalLine.debit_base/credit_base يبقى
+    مصدر الحقيقة المحاسبية (PHASE3B3_DESIGN_SPEC.md §1.13). Append-Only
+    — لا UPDATE، لا DELETE، بنفس صرامة Settlement (راجع
+    test_settlement_tamper_resistance.py)."""
+    __tablename__ = "settlement_allocations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    settlement_id: Mapped[int] = mapped_column(ForeignKey("settlements.id"))
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)
+    opening_party_entry_id: Mapped[int | None] = mapped_column(ForeignKey("opening_party_entries.id"), nullable=True)
+    amount_foreign: Mapped[float] = mapped_column(Numeric(14, 2))
+    fx_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(invoice_id IS NOT NULL AND opening_party_entry_id IS NULL) OR "
+            "(invoice_id IS NULL AND opening_party_entry_id IS NOT NULL)",
+            name="ck_settlement_allocation_exclusive_target",
+        ),
+        CheckConstraint("amount_foreign > 0", name="ck_settlement_allocation_amount_positive"),
+    )
+
+    settlement: Mapped["Settlement"] = relationship(back_populates="allocations")
+    invoice: Mapped["Invoice | None"] = relationship()
+    opening_party_entry: Mapped["OpeningPartyEntry | None"] = relationship()
+
+
+class OpeningPartyKind(str, enum.Enum):
+    RECEIVABLE = "receivable"   # العميل مدين لنا
+    PAYABLE = "payable"         # نحن مدينون للمورد
+
+
+class OpeningPartyEntry(Base):
+    """رصيد افتتاحي لعميل/مورد — Phase 3B-3. سجل تفصيلي مستقل تماماً
+    (لا جدول Receivable/Payable منفصلين)، بـJournalEntry مستقل خاص به
+    (لا قيد مُجمَّع لعدة أرصدة — PHASE3B3_DESIGN_SPEC.md §1.5). ليس
+    Invoice وهمية — InvoiceLine.item_id يبقى NOT NULL بلا مساس."""
+    __tablename__ = "opening_party_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"), unique=True)  # علاقة 1:1 — كل رصيد افتتاحي قيده المستقل الخاص به فقط (§1.5)
+    party_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    kind: Mapped[OpeningPartyKind] = mapped_column(Enum(OpeningPartyKind))
+    reference: Mapped[str] = mapped_column(String(100))  # وصفي/تتبعي فقط — بلا UNIQUE عمداً (قرار Bilal)
+    original_amount_foreign: Mapped[float] = mapped_column(Numeric(14, 2))
+    currency_code: Mapped[str] = mapped_column(String(3))
+    exchange_rate: Mapped[float] = mapped_column(Numeric(14, 6), default=1)
+    amount_base: Mapped[float] = mapped_column(Numeric(14, 2))  # محسوبة مرة واحدة وقت الإدخال، لا يُعاد تسعيرها لاحقاً
+    opening_date: Mapped[date] = mapped_column(Date)
+
+    __table_args__ = (
+        CheckConstraint("original_amount_foreign > 0", name="ck_opening_party_amount_positive"),
+        CheckConstraint("exchange_rate > 0", name="ck_opening_party_rate_positive"),
+    )
+
+    journal_entry: Mapped["JournalEntry"] = relationship()
+    party_account: Mapped["Account"] = relationship()
 
 
 # ---------------------------------------------------------------------------

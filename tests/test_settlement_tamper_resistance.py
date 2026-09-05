@@ -11,7 +11,7 @@ from decimal import Decimal as D_
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, CostMethod, Settlement
+from app.models import Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, CostMethod, Settlement, SettlementAllocation
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
 from app.services.posting import post_sales_invoice, post_purchase_invoice
@@ -55,7 +55,9 @@ sale1.lines = [InvoiceLine(item_id=item.id, quantity=D_("10"), unit_price=D_("10
 s.add(sale1); s.commit(); post_sales_invoice(s, sale1, is_cash=False); s.commit()
 post_receipt(s, sale1, D_("400"), today, D_("15000"), coa["cash"].id)
 s.commit()
-settlement_row = s.query(Settlement).filter_by(invoice_id=sale1.id).first()
+# Phase 3B-3: invoice_id انتقل من Settlement إلى SettlementAllocation
+settlement_alloc = s.query(SettlementAllocation).filter_by(invoice_id=sale1.id).first()
+settlement_row = s.get(Settlement, settlement_alloc.settlement_id)
 original_amount = settlement_row.amount_foreign
 original_fx = settlement_row.fx_amount
 check("1-2) التسوية الموجودة لم تتغيّر بعد أي عملية أخرى بالنظام (قيمة مرجعية للمقارنة لاحقاً)",

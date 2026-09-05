@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import (
-    Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, CostMethod, Settlement,
+    Base, Invoice, InvoiceLine, InvoiceKind, InvoiceStatus, CostMethod, SettlementAllocation,
 )
 from app.services.chart_of_accounts_template import create_default_chart_of_accounts
 from app.services.item_edit import create_item
@@ -91,8 +91,10 @@ def run_cycle(kind_label: str, invoice_kind, settle_fn, party_name):
     final_balance = get_invoice_balance_due(session, inv)
     check(f"[{kind_label}] بعد التسوية الكاملة: الرصيد = صفر بالضبط", final_balance == D_("0"))
 
-    settlements_count = session.query(Settlement).filter_by(invoice_id=inv.id).count()
-    check(f"[{kind_label}] 3 سجلات Settlement فعلية (جزئية×2 + كاملة)", settlements_count == 3)
+    # Phase 3B-3: invoice_id انتقل من Settlement إلى SettlementAllocation
+    # (كل قبض/دفع بسيط لا يزال يُنتِج تخصيصاً واحداً بالضبط لكل استدعاء)
+    settlements_count = session.query(SettlementAllocation).filter_by(invoice_id=inv.id).count()
+    check(f"[{kind_label}] 3 سجلات SettlementAllocation فعلية (جزئية×2 + كاملة)", settlements_count == 3)
 
     # --- رفض التسوية لحساب غير قابل للمطابقة (نُعطِّل allow_reconciliation
     #     على حساب الطرف بعد كل هذا، ونتأكد فاتورة جديدة عليه تُرفَض) ---
