@@ -57,6 +57,7 @@ REGRESSION_FILES = [
     "tests/test_phase3b3_migration.py",
     "tests/test_accounting_boundary_phase3b4.py",
     "tests/test_jv_rev_namespace_reconciliation.py",
+    "tests/test_jv_rev_reservation_independent_of_document_rollback.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

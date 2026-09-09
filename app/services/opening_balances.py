@@ -44,10 +44,11 @@ from app.models import InventoryMovement, MovementDirection, Item
 # JournalEntry يدوياً + حلقة add_manual_line — راجع PHASE3B4_DESIGN_SPEC.md.
 # منطق العمل (اختيار الحسابات، حساب raw/base، حساب Clearing، Idempotency)
 # بقي هنا بالكامل بلا تغيير؛ فقط "كيف يُنشأ القيد فعلياً" تغيّر.
-# reverse_opening_account_balances() ما زالت تستخدم reverse_manual_entry()
-# القديمة عمداً (لا journal_edit.py::reverse() الجديدة) — راجع تحذير النطاق
-# الموثَّق داخل reverse() نفسها بخصوص تصادم namespace "JV-REV" أثناء الفترة
-# الانتقالية؛ هذا Technical Debt مسجَّل، لا خطأ سهواً.
+# reverse_opening_account_balances() ما زالت تستدعي reverse_manual_entry()
+# (لا journal_edit.py::reverse() الجديدة مباشرة) — لكن reverse_manual_entry()
+# نفسها أصبحت الآن تستخدم _reserve_ref_no/journal_number_sequences بدل
+# COUNT/LIKE (إصلاح موحَّد لمصدر ترقيم JV-REV، راجع
+# tests/test_jv_rev_namespace_reconciliation.py) — لا خطر تصادم متبقٍّ.
 
 from app.models import Account, AccountType, JournalEntry, JournalEntryStatus, Setting, OpeningBalanceEntry
 from app.services.journal_edit import (

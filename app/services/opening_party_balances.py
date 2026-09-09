@@ -23,7 +23,7 @@ from app.models import (
     JournalEntry, JournalEntryStatus, SettlementAllocation,
 )
 from app.services.money import D, money, rate as rate_
-from app.services.journal_edit import add_manual_line, post_manual_entry, reverse_manual_entry
+from app.services.journal_edit import LineIntent, AccountingIntent, post_immediate, reverse
 from app.services.posting import get_base_currency
 from app.services.opening_balances import _get_clearing_account, OpeningBalanceError
 
@@ -68,27 +68,28 @@ def post_opening_party_entry(
     amount_base = money(amount_foreign * rate_(exchange_rate))
 
     is_receivable = (kind == OpeningPartyKind.RECEIVABLE)
-    entry = JournalEntry(
-        entry_date=opening_date,
-        ref_no=_next_opening_party_ref(session),
-        description=f"رصيد افتتاحي {'مدين' if is_receivable else 'دائن'} — {party_account.name_ar} ({reference})",
-        source_type="opening_party_entry", currency_code=base_currency, exchange_rate=Decimal("1"),
-        status=JournalEntryStatus.DRAFT,
-    )
-    session.add(entry)
-    session.flush()
+    description = f"رصيد افتتاحي {'مدين' if is_receivable else 'دائن'} — {party_account.name_ar} ({reference})"
 
-    # exchange_rate=1 عمداً: amount_base مُحوَّل للعملة الأساسية مسبقاً —
-    # نفس تفادي التحويل المزدوج المُتَّبع بـ3B-2.
+    # PHASE3B4: عبر post_immediate() (Accounting Posting Boundary) بدل بناء
+    # JournalEntry يدوياً + add_manual_line — نفس منطق raw/base (exchange_rate=1
+    # عمداً هنا: amount_base محوَّل للعملة الأساسية مسبقاً، تفادياً للتحويل المزدوج
+    # المُتَّبع بـ3B-2) بلا أي تغيير على قواعد العمل نفسها.
     if is_receivable:
-        add_manual_line(session, entry, account_id=party_account_id, debit=amount_base, exchange_rate=Decimal("1"))
-        add_manual_line(session, entry, account_id=clearing_account.id, credit=amount_base, exchange_rate=Decimal("1"))
+        line_intents = [
+            LineIntent(account_id=party_account_id, debit_raw=amount_base, debit_base=amount_base),
+            LineIntent(account_id=clearing_account.id, credit_raw=amount_base, credit_base=amount_base),
+        ]
     else:
-        add_manual_line(session, entry, account_id=clearing_account.id, debit=amount_base, exchange_rate=Decimal("1"))
-        add_manual_line(session, entry, account_id=party_account_id, credit=amount_base, exchange_rate=Decimal("1"))
+        line_intents = [
+            LineIntent(account_id=clearing_account.id, debit_raw=amount_base, debit_base=amount_base),
+            LineIntent(account_id=party_account_id, credit_raw=amount_base, credit_base=amount_base),
+        ]
 
-    session.expire(entry, ["lines"])
-    post_manual_entry(session, entry)
+    entry = post_immediate(session, AccountingIntent(
+        entry_date=opening_date, currency_code=base_currency, exchange_rate=Decimal("1"),
+        source_type="opening_party_entry", description=description,
+        lines=line_intents,
+    ))
 
     opening_entry = OpeningPartyEntry(
         journal_entry_id=entry.id, party_account_id=party_account_id, kind=kind,
@@ -128,10 +129,10 @@ def reverse_opening_party_entry(session: Session, entry: OpeningPartyEntry, reve
             f"القيد {journal_entry.ref_no} ليس قيد رصيد افتتاحي لعميل/مورد "
             f"(source_type='{journal_entry.source_type}')"
         )
-    return reverse_manual_entry(session, journal_entry, reversal_date,
-                                 description=f"عكس الرصيد الافتتاحي — {entry.reference}")
-
-
-def _next_opening_party_ref(session: Session) -> str:
-    count = session.query(JournalEntry).filter(JournalEntry.source_type == "opening_party_entry").count()
-    return f"JV-OPNPTY-{count + 1}"
+    # PHASE3B4: عبر journal_edit.py::reverse() (Boundary) بدل reverse_manual_entry()
+    # القديمة — أصبح آمناً الآن بعد توحيد مصدر ترقيم JV-REV (راجع
+    # tests/test_jv_rev_namespace_reconciliation.py). قاعدة العمل الخاصة بالدومين
+    # (منع العكس إن وُجدت Allocation) تبقى هنا فوق reverse()، لا داخلها — reverse()
+    # لا تعرف شيئاً عن SettlementAllocation، وهذا مقصود (§3: Boundary لا يحمل منطق دومين).
+    return reverse(session, journal_entry, reversal_date,
+                    description=f"عكس الرصيد الافتتاحي — {entry.reference}")

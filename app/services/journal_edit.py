@@ -57,6 +57,7 @@ class AccountingIntent:
 # هجرة دومين جديد فعلياً؛ لا namespace يُضاف "احتياطاً" بلا دومين يستخدمه.
 _NAMESPACE_BY_SOURCE_TYPE = {
     "opening_balance": "JV-OPEN",
+    "opening_party_entry": "JV-OPNPTY",
 }
 _REVERSAL_NAMESPACE = "JV-REV"
 
@@ -256,19 +257,17 @@ def post_immediate(session: Session, intent: AccountingIntent) -> JournalEntry:
 
 def reverse(session: Session, original_entry: JournalEntry, reversal_date: date,
             description: str | None = None) -> JournalEntry:
-    """العكس العام (§3 بالمواصفة). **تحذير نطاق مسجَّل صراحة (لا يُصلَح هنا)**:
-    يحجز الرقم من namespace "JV-REV" عبر Sequence Table — لكن reverse_manual_entry()
-    القديمة أدناه (لا تزال مُستخدَمة فعلياً من journal_voucher_form.py وopening_balances.py
-    الحاليين، لم يُهاجَرا بعد) تحجز من *نفس* الـprefix "JV-REV-%" بآلية LIKE/COUNT
-    منفصلة تماماً لا تعرف بوجود هذا الـSequence. استخدام الدالتين معاً بنفس الوقت على
-    قاعدة بيانات فيها بيانات JV-REV قديمة **سيُنتِج تصادم ref_no فعلياً** (UNIQUE
-    constraint على JournalEntry.ref_no) لأن الـSequence الجديدة تبدأ من last_value=0
-    بلا علم بعدد صفوف JV-REV-% الموجودة أصلاً. لذلك: هذه الدالة **لا تُستدعى من أي
-    Domain مُهاجَر بعد** (opening_balances.py لا يزال يستخدم reverse_manual_entry
-    القديمة عمداً بهذه الدفعة) — الانتقال الآمن لـ"JV-REV" يحتاج قراراً منفصلاً صريحاً
-    (Backfill/seed للـSequence بالقيمة الحالية الفعلية، أو تجميد كل مستدعي
-    reverse_manual_entry دفعة واحدة). موثَّق كـTechnical Debt بالتقرير، غير محلول عمداً
-    بهذه الدفعة."""
+    """العكس العام (§3 بالمواصفة). يحجز الرقم من namespace "JV-REV" عبر
+    Sequence Table.
+
+    **تحديث (كان تحذيراً، أصبح موثَّقاً كمُغلَق)**: كانت reverse_manual_entry()
+    أدناه تحجز من نفس الـprefix بآلية LIKE/COUNT منفصلة تماماً — أُصلِح هذا
+    بتوحيد مصدر الترقيم (raise reverse_manual_entry أدناه تستخدم الآن
+    _reserve_ref_no بنفس namespace "JV-REV" — لا مصدرَي حقيقة بعد الآن).
+    راجع tests/test_jv_rev_namespace_reconciliation.py للسيناريو الذي أثبت
+    المشكلة أولاً ثم أثبت الإصلاح. ملاحظة نطاق تبقى صحيحة: هذا توحيد رقم
+    فقط، لا نقل reverse_manual_entry() لهذه الدالة (reverse) ولا للـBoundary
+    عموماً — تبقى دالة مستقلة، فقط تشارك الآن نفس مصدر الأرقام."""
     if original_entry.status != JournalEntryStatus.POSTED:
         raise JournalEditError(f"القيد {original_entry.ref_no} غير مرحّل — لا يوجد ما يُعكس")
     if original_entry.is_reversal_of is not None:
@@ -363,10 +362,16 @@ def reverse_manual_entry(session: Session, original_entry: JournalEntry,
             "لا يجوز عكسه مرة ثانية."
         )
 
-    count = session.query(JournalEntry).filter(JournalEntry.ref_no.like("JV-REV-%")).count()
+    # PHASE3B4 — إصلاح مُصرَّح به صراحة (نطاق ضيق، ليس Migration): يوحّد
+    # مصدر ترقيم JV-REV مع journal_edit.py::reverse() الجديدة عبر نفس
+    # _reserve_ref_no()/journal_number_sequences، بدل COUNT/LIKE القديمة
+    # التي أثبت الاختبار الفعلي (tests/test_jv_rev_namespace_reconciliation.py)
+    # أنها تتصادم معها (UNIQUE collision مُعاد إنتاجه فعلياً بترتيب new→old→new).
+    # لا نقل لهذه الدالة إلى الـBoundary — فقط توحيد الرقم نفسه.
+    ref_no = _reserve_ref_no(session, _REVERSAL_NAMESPACE)
     reversal = JournalEntry(
         entry_date=reversal_date,
-        ref_no=f"JV-REV-{count + 1:06d}",
+        ref_no=ref_no,
         description=description or f"عكس القيد {original_entry.ref_no}",
         source_type="manual_reversal", is_reversal_of=original_entry.id,
         currency_code=original_entry.currency_code, exchange_rate=original_entry.exchange_rate,
