@@ -443,6 +443,20 @@ class StockTransfer(Base):
 # مضللة قليلاً، البنية والغرض صحيحان).
 # ---------------------------------------------------------------------------
 
+class JournalNumberSequence(Base):
+    """PHASE3B4_DESIGN_SPEC.md §1 — عدّاد ترقيم منفصل لكل namespace
+    (JV-OPEN، JV-REV، JE-SAL، ...). التحديث الفعلي (+1) يتم عبر اتصال
+    SQLite مستقل تماماً (راجع journal_edit.py::_reserve_ref_no)، لا عبر
+    هذا الـORM model مباشرة — الحجز يحتاج Transaction مستقلة عن جلسة
+    المستند (§1/§4)، وSQLAlchemy Session المشتركة لا تحقق هذا الاستقلال
+    تلقائياً. الـmodel موجود هنا للتوثيق البنيوي وأي استعلام قراءة فقط."""
+    __tablename__ = "journal_number_sequences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(30), unique=True)
+    last_value: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class OpeningBalanceEntry(Base):
     __tablename__ = "opening_balance_entries"
 

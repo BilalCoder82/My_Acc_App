@@ -39,13 +39,21 @@ from app.models import InventoryMovement, MovementDirection, Item
 # ---------------------------------------------------------------------------
 # Phase 3B-1 — الأرصدة الافتتاحية للحسابات العامة فقط
 # ---------------------------------------------------------------------------
-# مبدأ التصميم: لا آلية ترحيل جديدة. يُعاد استخدام add_manual_line() +
-# post_manual_entry() الموجودتين فعلياً بـjournal_edit.py حرفياً — القيد
-# الافتتاحي قيد يدوي عادي بمنظور المحرك، فقط بقواعد تحقق إضافية قبل
-# بنائه (حساب Clearing إلزامي من إعدادات الشركة، منع تكرار الترحيل).
+# PHASE3B4 (محدَّث): post_opening_account_balances() أصبحت تمرّ عبر
+# Accounting Posting Boundary (journal_edit.py::post_immediate) بدل بناء
+# JournalEntry يدوياً + حلقة add_manual_line — راجع PHASE3B4_DESIGN_SPEC.md.
+# منطق العمل (اختيار الحسابات، حساب raw/base، حساب Clearing، Idempotency)
+# بقي هنا بالكامل بلا تغيير؛ فقط "كيف يُنشأ القيد فعلياً" تغيّر.
+# reverse_opening_account_balances() ما زالت تستخدم reverse_manual_entry()
+# القديمة عمداً (لا journal_edit.py::reverse() الجديدة) — راجع تحذير النطاق
+# الموثَّق داخل reverse() نفسها بخصوص تصادم namespace "JV-REV" أثناء الفترة
+# الانتقالية؛ هذا Technical Debt مسجَّل، لا خطأ سهواً.
 
 from app.models import Account, AccountType, JournalEntry, JournalEntryStatus, Setting, OpeningBalanceEntry
-from app.services.journal_edit import add_manual_line, post_manual_entry, reverse_manual_entry
+from app.services.journal_edit import (
+    add_manual_line, post_manual_entry, reverse_manual_entry,
+    LineIntent, AccountingIntent, post_immediate,
+)
 from app.services.posting import get_base_currency, _next_ref_no
 from app.services.money import money, rate as rate_, D, qty
 
@@ -121,8 +129,9 @@ def post_opening_account_balances(
 ) -> JournalEntry:
     """
     3B-1 حصراً — راجع رأس الملف. يبني قيداً واحداً POSTED مباشرة عبر
-    add_manual_line()/post_manual_entry() الموجودتين فعلياً — لا منطق
-    ترحيل جديد. §9: Idempotency برفض صريح — لا تنفيذ ثانٍ لنفس النطاق.
+    journal_edit.py::post_immediate() (PHASE3B4 Accounting Posting
+    Boundary) — لا منطق ترحيل جديد بهذه الدالة، فقط تفويض للـBoundary.
+    §9: Idempotency برفض صريح — لا تنفيذ ثانٍ لنفس النطاق.
 
     قاعدة صريحة (مراجعة Bilal): **لا تعني نجاح هذه الدالة أن العملية
     أصبحت committed فعلياً على القرص** — تعني أنها أصبحت جاهزة ضمن
@@ -159,63 +168,52 @@ def post_opening_account_balances(
         if d == 0 and c == 0:
             raise OpeningBalanceError(f"سطر الحساب {e.account_id}: لازم مبلغ مدين أو دائن — لا سطر فارغ")
 
-    entry = JournalEntry(
-        entry_date=opening_date,
-        ref_no=_next_ref_no(session, "JV-OPEN"),
-        description="قيد الأرصدة الافتتاحية للحسابات",
-        source_type="opening_balance", currency_code=base_currency, exchange_rate=Decimal("1"),
-        status=JournalEntryStatus.DRAFT,
-    )
-    session.add(entry)
-    session.flush()
-
-    audit_rows: list[OpeningBalanceEntry] = []
+    # PHASE3B4: بناء كل الأسطر (بما فيها سطر التوازن) بالذاكرة أولاً، ثم
+    # post_immediate() دفعة واحدة — لا حاجة بعد الآن لـ"حيلة" الاستعلام
+    # المباشر من JournalLine لتفادي مشكلة الـcache القديمة (§ الملاحظة
+    # المحذوفة أدناه): post_immediate يبني كل الأسطر بذاكرة Python قبل أي
+    # flush جزئي، فلا يوجد entry.lines قديم مخزَّن (cache) ليختلف عن الواقع أصلاً.
+    line_intents: list[LineIntent] = []
+    audit_meta: list[tuple[Account, str, Decimal, Decimal, Decimal]] = []  # account, currency, debit_fx, credit_fx, rate
     for e in entries:
         account = _validate_entry_account(session, e.account_id, clearing_account.id)
         line_currency = e.currency_code or base_currency
-        # None يعني "يرث عملة القيد الافتراضية" (نفس نمط add_manual_line
-        # الموثَّق) — لا نمرّره صراحة إلا لو كانت عملة السطر مختلفة فعلاً
         passed_currency = None if line_currency == base_currency else line_currency
-        add_manual_line(
-            session, entry, account_id=account.id,
-            debit=e.debit_foreign, credit=e.credit_foreign, exchange_rate=e.exchange_rate,
+        eff_rate = rate_(e.exchange_rate)
+        d, c = money(e.debit_foreign), money(e.credit_foreign)
+        line_intents.append(LineIntent(
+            account_id=account.id, debit_raw=d, credit_raw=c,
+            debit_base=money(d * eff_rate), credit_base=money(c * eff_rate),
             line_currency_code=passed_currency, line_exchange_rate=e.exchange_rate,
-        )
-        base_eq = money((e.debit_foreign or e.credit_foreign) * rate_(e.exchange_rate))
-        audit_rows.append(OpeningBalanceEntry(
-            journal_entry_id=entry.id, account_id=account.id, currency_code=line_currency,
-            debit_foreign=money(e.debit_foreign), credit_foreign=money(e.credit_foreign),
-            exchange_rate=e.exchange_rate, base_equivalent=base_eq, opening_date=opening_date,
         ))
+        audit_meta.append((account, line_currency, d, c, e.exchange_rate))
 
-    # سطر التوازن التلقائي — الفرق بالعملة الأساسية بين كل الأسطر
-    # اليدوية، على حساب Clearing المُعتمَد. القيد متوازن دائماً بالتعريف
-    # بعد هذا السطر (§6) — لا يعني أن كل مُدخَل صحيح محاسبياً، فقط أن
-    # القيد متوازن حسابياً؛ عرض الفرق للمستخدم قبل التأكيد مسؤولية
-    # الواجهة لاحقاً (3B-6)، خارج نطاق الخدمة هنا.
-    # ملاحظة تقنية: نستعلم JournalLine مباشرة (لا entry.lines) عمداً —
-    # الوصول المبكر لـentry.lines هنا كان يُخزِّن مجموعة قديمة (cache)
-    # لا تلتقط سطر التوازن المُضاف لاحقاً عبر add_manual_line (تُدرِج
-    # عبر entry_id مباشرة، لا عبر entry.lines.append())، فيفشل تحقق
-    # is_balanced() داخل post_manual_entry لاحقاً بفارق كامل قيمة السطر
-    # الأول رغم وجود السطرين فعلياً بقاعدة البيانات — بق حقيقي اكتُشف
-    # واختُبِر أثناء بناء 3B-1، لا افتراضياً.
-    from app.models import JournalLine as _JournalLine
-    current_lines = session.query(_JournalLine).filter_by(entry_id=entry.id).all()
-    total_debit_base = sum(money(l.debit_base) for l in current_lines)
-    total_credit_base = sum(money(l.credit_base) for l in current_lines)
+    # سطر التوازن التلقائي — الفرق بالعملة الأساسية بين كل الأسطر أعلاه،
+    # على حساب Clearing المُعتمَد (§6). القيد متوازن دائماً بالتعريف بعد
+    # هذا السطر — لا يعني أن كل مُدخَل صحيح محاسبياً، فقط أن القيد متوازن
+    # حسابياً؛ عرض الفرق للمستخدم قبل التأكيد مسؤولية الواجهة لاحقاً (3B-6).
+    total_debit_base = sum(li.debit_base for li in line_intents)
+    total_credit_base = sum(li.credit_base for li in line_intents)
     diff = total_debit_base - total_credit_base
     if diff != 0:
         if diff > 0:
-            add_manual_line(session, entry, account_id=clearing_account.id, credit=diff, exchange_rate=Decimal("1"))
+            line_intents.append(LineIntent(account_id=clearing_account.id, credit_raw=diff, credit_base=diff))
         else:
-            add_manual_line(session, entry, account_id=clearing_account.id, debit=-diff, exchange_rate=Decimal("1"))
+            line_intents.append(LineIntent(account_id=clearing_account.id, debit_raw=-diff, debit_base=-diff))
 
-    session.expire(entry, ["lines"])  # يفرض إعادة تحميل نظيفة تلتقط كل الأسطر فعلياً قبل post_manual_entry
-    post_manual_entry(session, entry)  # يفرض is_balanced() + كل تحققات journal_edit.py الحالية، لا تكرار
+    entry = post_immediate(session, AccountingIntent(
+        entry_date=opening_date, currency_code=base_currency, exchange_rate=Decimal("1"),
+        source_type="opening_balance", description="قيد الأرصدة الافتتاحية للحسابات",
+        lines=line_intents,
+    ))
 
-    for row in audit_rows:
-        session.add(row)
+    for account, line_currency, d, c, ex_rate in audit_meta:
+        base_eq = money((d or c) * rate_(ex_rate))
+        session.add(OpeningBalanceEntry(
+            journal_entry_id=entry.id, account_id=account.id, currency_code=line_currency,
+            debit_foreign=d, credit_foreign=c,
+            exchange_rate=ex_rate, base_equivalent=base_eq, opening_date=opening_date,
+        ))
     session.add(Setting(key=OPENING_BALANCES_SETTING_KEY, value=str(opening_date)))
     session.flush()
     return entry
