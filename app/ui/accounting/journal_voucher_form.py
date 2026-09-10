@@ -19,7 +19,9 @@ from PySide6.QtGui import QFont, QShortcut, QKeySequence
 from sqlalchemy.orm import Session
 
 from app.models import JournalEntry, JournalEntryStatus
-from app.services.journal_edit import add_manual_line, post_manual_entry, JournalEditError
+from app.services.journal_edit import (
+    begin_entry, add_line, remove_line, post as boundary_post, JournalEditError, _validate_line,
+)
 from app.services.posting import get_base_currency
 from app.services.account_queries import list_postable_accounts
 from app.ui.common.numeric_delegate import NumericGridDelegate, PlainTextGridDelegate, format_currency
@@ -623,35 +625,43 @@ class JournalVoucherFormView(QWidget):
         self._apply_post_button_state(diff == 0)
 
     # -- حفظ وترحيل --------------------------------------------------------
-    def _next_ref_no(self) -> str:
-        count = self.session.query(JournalEntry).filter(
-            JournalEntry.ref_no.like("JV-%")
-        ).count()
-        return f"JV-{count + 1:06d}"
+    # PHASE3B4: _next_ref_no() القديمة (COUNT-based، LIKE "JV-%") حُذِفت —
+    # كانت بها ثغرة عد حقيقية: LIKE "JV-%" يطابق أيضاً JV-OPEN-%/JV-REV-%/
+    # JV-OPNPTY-% (كل namespace آخر يبدأ بـ"JV-")، فكان عدّاد سند القيد
+    # اليدوي يتأثر فعلياً بعدد قيود دومينات أخرى تماماً — بق مكتشَف أثناء
+    # هذه الهجرة تحديداً، لا افتراضياً. begin_entry() الجديدة تستخدم
+    # namespace="JV" مُخصَّصاً ومعزولاً تماماً عبر journal_number_sequences.
+    #
+    # تحذير تشغيلي: أي قاعدة عميل فيها قيود يدوية سابقة بصيغة JV-NNNNNN
+    # يجب تشغيل tools/backfill_seed_jv_manual_sequence.py عليها *قبل* أول
+    # استخدام لهذه النسخة — وإلا ستُعاد أرقام مُستخدَمة فعلاً (نفس فئة
+    # مشكلة JV-REV المُكتشَفة والمُصلَحة سابقاً بهذا المشروع).
 
-    def _save_draft(self) -> None:
+    def _save_draft(self) -> bool:
+        """يُرجِع True لو حُفِظ فعلياً (قيد صالح كامل)، False لو رُفِض بالكامل
+        (لا تغيير إطلاقاً على أي حالة سابقة) — يستخدمه _post() ليعرف هل
+        يتابع الترحيل أم لا، بدل افتراض النجاح بمجرد أن self.entry ليس None.
+        """
+        if self.entry is not None and self.entry.status == JournalEntryStatus.POSTED:
+            # PHASE3B4: حارس مفقود بالكود القديم بالكامل — النسخة القديمة كانت
+            # تحذف أسطر القيد المرحّل مباشرة (session.delete بلا ensure_editable)
+            # قبل أن تفشل عند إعادة إضافتها، فتترك القيد POSTED بلا أسطر فعلياً
+            # (فساد بيانات صامت). الآن: رفض واضح فوري، لا محاولة تعديل إطلاقاً.
+            QMessageBox.warning(self, "غير مسموح", f"القيد {self.entry.ref_no} مرحّل بالفعل — لا يمكن تعديله.")
+            return False
+
         default_currency = self.default_currency_combo.currentText()
         default_rate = Decimal(str(self.default_exchange_rate_spin.value()))
 
-        if self.entry is None:
-            self.entry = JournalEntry(
-                entry_date=self.date_edit.date().toPython(),
-                ref_no=self._next_ref_no(),
-                description=self.description_edit.text().strip(),
-                source_type="manual", currency_code=default_currency, exchange_rate=default_rate,
-                status=JournalEntryStatus.DRAFT,
-            )
-            self.session.add(self.entry)
-            self.session.flush()
-        else:
-            self.entry.description = self.description_edit.text().strip()
-            self.entry.currency_code = default_currency
-            self.entry.exchange_rate = default_rate
-            for line in list(self.entry.lines):
-                self.session.delete(line)
-            self.session.flush()
-
-        errors = []
+        # PHASE3B4 — إصلاح Atomicity حقيقي (لا كان بالنسخة السابقة من هذه
+        # الهجرة): **كل** أسطر الشبكة تُقرأ وتُتحقَّق أولاً (عبر _validate_line
+        # نفسها التي تستخدمها add_line لاحقاً — مصدر تحقق واحد، لا نسخة
+        # ثانية قد تختلف) بلا أي لمسة لقاعدة البيانات أو الجلسة إطلاقاً. لو
+        # فشل سطر واحد فقط: توقف فوري، لا حذف لأي سطر قديم، لا حفظ جزئي، لا
+        # commit — المسودة السابقة (إن وُجدت) تبقى كما هي بالضبط بايت لبايت.
+        # فقط لو نجحت كل الأسطر معاً تبدأ أي كتابة فعلية.
+        parsed_rows: list[tuple] = []
+        errors: list[str] = []
         for row in range(self.grid.rowCount()):
             if not self._row_has_data(row):
                 continue
@@ -662,35 +672,87 @@ class JournalVoucherFormView(QWidget):
                 continue
             debit_txt = (self.grid.item(row, COL_DEBIT).text() or "0").replace(",", "")
             credit_txt = (self.grid.item(row, COL_CREDIT).text() or "0").replace(",", "")
-            # عملة/سعر خاصان بهذا السطر فقط لو المستخدم فعلاً عبّاهم — وإلا
-            # None فيرث السطر عملة القيد الافتراضية (السلوك القديم بدون تغيير)
             line_currency_txt = (self.grid.item(row, COL_CURRENCY).text() or "").strip()
             line_rate_txt = (self.grid.item(row, COL_RATE).text() or "").replace(",", "").strip()
             line_currency_code = line_currency_txt or None
             line_exchange_rate = Decimal(line_rate_txt) if line_rate_txt else None
+            effective_rate = rate_(line_exchange_rate if line_exchange_rate is not None else default_rate)
+            debit_raw = money_(debit_txt or "0")
+            credit_raw = money_(credit_txt or "0")
+            debit_base = money_(debit_raw * effective_rate)
+            credit_base = money_(credit_raw * effective_rate)
             try:
-                add_manual_line(
-                    self.session, self.entry, account_id=match.id,
-                    debit=debit_txt or 0, credit=credit_txt or 0,
-                    exchange_rate=default_rate,
-                    line_currency_code=line_currency_code, line_exchange_rate=line_exchange_rate,
-                )
+                _validate_line(self.session, match.id, debit_raw, credit_raw, debit_base, credit_base,
+                                line_currency_code, line_exchange_rate)
             except JournalEditError as e:
                 errors.append(f"السطر {row+1}: {e}")
+                continue
+            parsed_rows.append((match.id, debit_raw, credit_raw, debit_base, credit_base,
+                                 line_currency_code, line_exchange_rate))
 
         if errors:
-            QMessageBox.warning(self, "تنبيه", "\n".join(errors))
+            QMessageBox.warning(self, "تنبيه", "\n".join(errors) + "\n\nلم يُحفَظ أي تغيير — المسودة السابقة (إن وُجدت) بقيت كما هي.")
+            return False
+        if not parsed_rows:
+            QMessageBox.warning(self, "تنبيه", "لا توجد أسطر صالحة للحفظ")
+            return False
 
-        self.session.commit()
+        # من هنا فقط: كل الأسطر صالحة مسبقاً — لا مزيد من validation failures
+        # ممكنة بهذه المرحلة. الحارس أدناه دفاعي بحت (Action Required غير
+        # حاجب من المراجعة الأخيرة): استثناء بنيوي غير متوقَّع (IntegrityError/
+        # OperationalError/إلخ) في منتصف الكتابة يُرجِع الجلسة صراحة لحالة
+        # نظيفة بدل تركها بحالة transaction فاشلة غير معلومة — هذا ليس نفس
+        # Bug الـpartial-commit-after-validation-failure المُصلَح أعلاه (ذاك
+        # كان يفشل بسبب معروف يجب رفضه *قبل* أي كتابة أصلاً)، بل شبكة أمان
+        # لفشل بنية تحتية لا نتوقعه أصلاً بهذه المرحلة.
+        try:
+            is_new_entry = self.entry is None
+            if self.entry is None:
+                self.entry = begin_entry(
+                    self.session, entry_date=self.date_edit.date().toPython(),
+                    currency_code=default_currency, exchange_rate=default_rate,
+                    source_type="manual", description=self.description_edit.text().strip(),
+                )
+            else:
+                self.entry.description = self.description_edit.text().strip()
+                self.entry.currency_code = default_currency
+                self.entry.exchange_rate = default_rate
+                for line in list(self.entry.lines):
+                    remove_line(self.session, line)
+
+            for account_id, debit_raw, credit_raw, debit_base, credit_base, line_currency_code, line_exchange_rate in parsed_rows:
+                add_line(
+                    self.session, self.entry, account_id=account_id,
+                    debit_raw=debit_raw, credit_raw=credit_raw, debit_base=debit_base, credit_base=credit_base,
+                    line_currency_code=line_currency_code, line_exchange_rate=line_exchange_rate,
+                )
+            self.session.commit()
+        except Exception as e:  # noqa: BLE001 — دفاعي عمداً: أي استثناء بنيوي غير متوقَّع هنا
+            self.session.rollback()
+            if is_new_entry:
+                # self.entry كان قيداً جديداً أُنشئ بهذه المحاولة فقط — بعد
+                # rollback أصبح كائناً معلَّقاً (stale) لا يمثّل شيئاً حقيقياً
+                # بقاعدة البيانات؛ إبقاؤه بـself.entry يُضلِّل _post()/الحفظ
+                # التالي. لو كان قيداً موجوداً مسبقاً (تعديل)، يبقى كما هو —
+                # rollback يُعيده لحالته الصحيحة بقاعدة البيانات، لا يُبطِله.
+                self.entry = None
+            QMessageBox.critical(self, "خطأ غير متوقَّع", f"تعذّر حفظ المسودة بسبب خطأ داخلي غير متوقَّع:\n{e}")
+            return False
+
         self.ref_edit.setText(self.entry.ref_no)
         self.ref_label.setText(self.entry.ref_no)
         QMessageBox.information(self, "تم", "تم حفظ المسودة")
         self._refresh_editability()
+        return True
 
     def _post(self) -> None:
         if self.entry is None or not self.entry.lines:
-            self._save_draft()
-        if self.entry is None:
+            if not self._save_draft():
+                # PHASE3B4: لا يتابع الترحيل أبداً لو فشل إعداد/حفظ المسودة —
+                # سابقاً كان الكود يتجاهل نتيجة _save_draft() تماماً ويتابع
+                # طالما self.entry ليس None، فيرحّل حالة جزئية غير معلومة.
+                return
+        if self.entry is None or not self.entry.lines:
             return
 
         confirm = QMessageBox.question(
@@ -703,7 +765,7 @@ class JournalVoucherFormView(QWidget):
             return
 
         try:
-            post_manual_entry(self.session, self.entry)
+            boundary_post(self.session, self.entry)
             self.session.commit()
         except JournalEditError as e:
             self.session.rollback()

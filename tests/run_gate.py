@@ -58,6 +58,11 @@ REGRESSION_FILES = [
     "tests/test_accounting_boundary_phase3b4.py",
     "tests/test_jv_rev_namespace_reconciliation.py",
     "tests/test_jv_rev_reservation_independent_of_document_rollback.py",
+    "tests/test_ui_journal_voucher_boundary.py",
+    "tests/test_jv_manual_namespace_seed.py",
+    "tests/test_sales_invoice_boundary_migration.py",
+    "tests/test_purchase_invoice_boundary_migration.py",
+    "tests/test_real_db_path_no_lock_on_first_post.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

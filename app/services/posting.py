@@ -29,6 +29,7 @@ from app.services.invoice_validation import validate_invoice_for_posting, Invoic
 from app.services.item_queries import get_item_stock_summary
 from app.services.money import D, money
 from app.services.sanity_guard import assert_reasonable_conversion
+from app.services.journal_edit import LineIntent, AccountingIntent, post_immediate
 
 
 class PostingError(Exception):
@@ -128,6 +129,32 @@ def _average_cost(session: Session, item_id: int, warehouse_id: int) -> Decimal:
     return get_item_stock_summary(session, item_id, warehouse_id=warehouse_id).average_cost
 
 
+def _line_intent(account_id: int, debit: Decimal, credit: Decimal, exchange_rate) -> LineIntent:
+    """PHASE3B4/Group 3-A — نظير _jline() تماماً لكن يُرجِع LineIntent
+    بدل JournalLine جاهز (لا نبني JournalLine مباشرة بعد الآن — يبنيه
+    post_immediate() داخل الـBoundary). **نفس الحساب حرفياً بلا أي تغيير**،
+    بما في ذلك استدعاء assert_reasonable_conversion — هذا الحارس لا علاقة
+    له بمكان بناء JournalLine، فيبقى كما هو."""
+    d, c, rate = money(debit), money(credit), D(exchange_rate)
+    debit_base, credit_base = money(d * rate), money(c * rate)
+    assert_reasonable_conversion(
+        raw_amount=d, stored_base_amount=debit_base, exchange_rate=rate,
+        context=f"_line_intent debit account={account_id}",
+    )
+    assert_reasonable_conversion(
+        raw_amount=c, stored_base_amount=credit_base, exchange_rate=rate,
+        context=f"_line_intent credit account={account_id}",
+    )
+    return LineIntent(account_id=account_id, debit_raw=d, credit_raw=c, debit_base=debit_base, credit_base=credit_base)
+
+
+def _line_intent_base(account_id: int, debit_base: Decimal, credit_base: Decimal) -> LineIntent:
+    """نظير _jline_base() تماماً — راجع تعليقها لسبب وجودها منفصلة
+    (COGS/Inventory: base-only، لا علاقة بعملة/سعر صرف الفاتورة)."""
+    d, c = money(debit_base), money(credit_base)
+    return LineIntent(account_id=account_id, debit_raw=d, credit_raw=c, debit_base=d, credit_base=c)
+
+
 def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True) -> JournalEntry:
     if invoice.status == InvoiceStatus.POSTED:
         raise PostingError("الفاتورة مرحّلة أصلاً — لا يمكن ترحيلها مرتين")
@@ -147,15 +174,18 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
     default_sales_acc = _get_setting(session, "default_sales_account_id")
     tax_acc = _get_setting(session, "default_sales_tax_account_id")
     warehouse_id = _invoice_warehouse_id(session, invoice)
-
-    entry = JournalEntry(
-        entry_date=invoice.invoice_date,
-        ref_no=_next_ref_no(session, "JE-SAL"),
-        description=f"فاتورة بيع رقم {invoice.invoice_no} — {invoice.party_name}",
-        source_type="sales_invoice", source_id=invoice.id,
-        currency_code=invoice.currency_code, exchange_rate=invoice.exchange_rate,
-        status=JournalEntryStatus.POSTED,
-    )
+    # PHASE3B4/Group 3-B — إصلاح حقيقي اكتُشف بالاختبار عبر المسار الفعلي
+    # open_company_db() (لا :memory:): get_or_create_party_account()/
+    # get_default_warehouse() قد تُنشئان صفاً جديداً (عميل جديد، مستودع
+    # افتراضي أول مرة) عبر session.flush() **بلا commit** — هذا يُبقي
+    # transaction الجلسة الرئيسية مفتوحة، فيتصادم مع الاتصال المستقل الذي
+    # يفتحه _reserve_ref_no داخل post_immediate (BEGIN IMMEDIATE يفشل بـ
+    # "database is locked" فعلياً، مُعاد إنتاجه ومُصلَح، راجع تقرير
+    # Group 3-B). commit صريح هنا يضمن عدم وجود transaction معلَّقة قبل أي
+    # استدعاء لـpost_immediate — **نفس الإصلاح يسري على post_purchase_invoice
+    # أدناه**، وأيضاً كان يجب تطبيقه بأثر رجعي هنا (Group 3-A) لأنها كانت
+    # تحمل نفس الخلل بالضبط رغم أنها كانت "مغلقة" فعلاً.
+    session.commit()
 
     total_sales, total_tax = Decimal("0"), Decimal("0")
     # مُجمَّعة بحساب المادة الفعلي — فاتورة بعدة مواد بحسابات مبيعات/مخزون/تكلفة
@@ -167,6 +197,7 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
     cogs_debits: dict[int, Decimal] = {}
     inventory_credits: dict[int, Decimal] = {}
     totals = compute_invoice_totals(invoice)
+    pending_movements: list[InventoryMovement] = []
 
     for line_total in totals.lines:
         item = session.get(Item, line_total.line.item_id)
@@ -181,31 +212,52 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         cogs_debits[item.cogs_account_id] = cogs_debits.get(item.cogs_account_id, Decimal("0")) + line_cogs
         inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cogs
 
-        session.add(InventoryMovement(
+        # PHASE3B4/Group 3-A: لا session.add() هنا بعد الآن — تُجمَّع فقط،
+        # وتُضاف فعلياً لاحقاً *بعد* نجاح post_immediate() (راجع try أدناه)،
+        # حتى لا تبقى حركات مخزون يتيمة معلَّقة بالجلسة لو فشلت المحاسبة.
+        pending_movements.append(InventoryMovement(
             item_id=item.id, warehouse_id=warehouse_id, direction=MovementDirection.OUT,
             quantity=line_total.line.quantity, unit_cost=unit_cost,
             movement_date=invoice.invoice_date, source_type="sales_invoice", source_id=invoice.id,
         ))
 
-    entry.lines = [_jline(cash_or_ar, total_sales + total_tax, Decimal("0"), invoice.exchange_rate)]
+    # AccountingIntent كامل ومبني بالذاكرة بالكامل قبل أي استدعاء لـpost_immediate
+    # — لا بناء تدريجي عبر الـBoundary. الترتيب مطابق تماماً للنسخة السابقة:
+    # Cash/AR → Sales (بترتيب الظهور) → Tax إن وُجد → COGS (غير صفري فقط) →
+    # Inventory (غير صفري فقط). ملاحظة: sales_credits لا فلترة "غير صفري" لها
+    # (سلوك موروث كما هو، لم نُضِف فلترة جديدة لم تكن موجودة أصلاً).
+    line_intents: list[LineIntent] = [_line_intent(cash_or_ar, total_sales + total_tax, Decimal("0"), invoice.exchange_rate)]
     for acc_id, amount in sales_credits.items():
-        entry.lines.append(_jline(acc_id, Decimal("0"), amount, invoice.exchange_rate))
+        line_intents.append(_line_intent(acc_id, Decimal("0"), amount, invoice.exchange_rate))
     if total_tax:
-        entry.lines.append(_jline(tax_acc, Decimal("0"), total_tax, invoice.exchange_rate))
+        line_intents.append(_line_intent(tax_acc, Decimal("0"), total_tax, invoice.exchange_rate))
     for acc_id, amount in cogs_debits.items():
         if amount:
-            entry.lines.append(_jline_base(acc_id, amount, Decimal("0")))
+            line_intents.append(_line_intent_base(acc_id, amount, Decimal("0")))
     for acc_id, amount in inventory_credits.items():
         if amount:
-            entry.lines.append(_jline_base(acc_id, Decimal("0"), amount))
+            line_intents.append(_line_intent_base(acc_id, Decimal("0"), amount))
 
-    if not entry.is_balanced():
-        raise PostingError("خطأ داخلي: القيد غير متوازن — لا يُرحّل")
-
-    invoice.status = InvoiceStatus.POSTED
-    session.add(entry)
-    session.flush()
-    invoice.journal_entry_id = entry.id
+    # PHASE3B4/Group 3-A — Atomicity: المسار التجاري الكامل (قيد + أسطر +
+    # حركات مخزون + حالة الفاتورة) يجب أن ينجح معاً أو يفشل معاً بلا أثر.
+    # post_immediate() نفسها تحجز ref_no بـtransaction مستقلة (§4) — فشل ما
+    # بعدها هنا (مثلاً إضافة الحركات) لا يُعيد الرقم (فجوة مقبولة بالتصميم)،
+    # لكنه يجب ألا يترك القيد/الأسطر/الحركات/حالة الفاتورة بحالة متناقضة.
+    try:
+        entry = post_immediate(session, AccountingIntent(
+            entry_date=invoice.invoice_date, currency_code=invoice.currency_code,
+            exchange_rate=invoice.exchange_rate, source_type="sales_invoice",
+            description=f"فاتورة بيع رقم {invoice.invoice_no} — {invoice.party_name}",
+            source_id=invoice.id, lines=line_intents,
+        ))
+        for movement in pending_movements:
+            session.add(movement)
+        invoice.status = InvoiceStatus.POSTED
+        invoice.journal_entry_id = entry.id
+        session.flush()
+    except Exception:
+        session.rollback()
+        raise
     return entry
 
 
@@ -225,19 +277,14 @@ def post_purchase_invoice(session: Session, invoice: Invoice, is_cash: bool = Tr
         cash_or_ap = party_account.id
     tax_acc = _get_setting(session, "default_purchases_tax_account_id")
     warehouse_id = _invoice_warehouse_id(session, invoice)
-
-    entry = JournalEntry(
-        entry_date=invoice.invoice_date,
-        ref_no=_next_ref_no(session, "JE-PUR"),
-        description=f"فاتورة شراء رقم {invoice.invoice_no} — {invoice.party_name}",
-        source_type="purchase_invoice", source_id=invoice.id,
-        currency_code=invoice.currency_code, exchange_rate=invoice.exchange_rate,
-        status=JournalEntryStatus.POSTED,
-    )
+    # PHASE3B4/Group 3-B — نفس إصلاح post_sales_invoice أعلاه بالضبط (راجع
+    # تعليقها) — commit صريح لتفادي "database is locked" عند حجز ref_no.
+    session.commit()
 
     total_purchase, total_tax = Decimal("0"), Decimal("0")
     inventory_debits: dict[int, Decimal] = {}
     totals = compute_invoice_totals(invoice)
+    pending_movements: list[InventoryMovement] = []
 
     for line_total in totals.lines:
         item = session.get(Item, line_total.line.item_id)
@@ -249,35 +296,46 @@ def post_purchase_invoice(session: Session, invoice: Invoice, is_cash: bool = Tr
         )
 
         q = D(line_total.line.quantity)
-        # **حرج**: تكلفة الوحدة المخزَّنة بـInventoryMovement يجب أن تكون
-        # دائماً بالعملة الأساسية — نفس مبدأ WORKFLOW.md §23 ("تكلفة المخزون
-        # تُسجَّل بالعملة الأساسية وقت الاقتناء"). net_after_all_discounts
-        # بالأعلى بعملة الفاتورة الأصلية (USD مثلاً) بلا أي تحويل — قبل هذا
-        # الإصلاح كانت تُخزَّن كما هي دون ضرب بسعر الصرف، فيختلط دولار خام
-        # مع ليرة سورية بالمتوسط المرجّح لأي مادة تُشترى أحياناً بعملة أساسية
-        # وأحياناً بعملة أجنبية — خطأ حقيقي انكشف فقط باختبار End-to-End
-        # بفاتورة شراء دولارية فعلية، راجع WORKFLOW.md §29.
+        # **حرج، غير مُمَسّ بهذه الهجرة**: تكلفة الوحدة المخزَّنة بـ
+        # InventoryMovement يجب أن تكون دائماً بالعملة الأساسية — نفس مبدأ
+        # WORKFLOW.md §23. هذا الحساب مستقل تماماً عن AccountingIntent/سطر
+        # القيد المحاسبي لحساب المخزون (ذاك يبقى بعملة الفاتورة الخام عبر
+        # _line_intent تماماً كـCash/AP، لا علاقة له بـunit_cost هنا) — لا
+        # تحويل مزدوج، ولا Boundary يحسب أو يعرف عن unit_cost إطلاقاً.
         net_in_base = money(line_total.net_after_all_discounts * D(invoice.exchange_rate))
         unit_cost_after_discount = (net_in_base / q) if q else Decimal("0")
-        session.add(InventoryMovement(
+        pending_movements.append(InventoryMovement(
             item_id=item.id, warehouse_id=warehouse_id, direction=MovementDirection.IN,
             quantity=line_total.line.quantity, unit_cost=unit_cost_after_discount,
             movement_date=invoice.invoice_date, source_type="purchase_invoice", source_id=invoice.id,
         ))
 
-    entry.lines = [_jline(cash_or_ap, Decimal("0"), total_purchase + total_tax, invoice.exchange_rate)]
+    # AccountingIntent — كل الأسطر بعملة الفاتورة الخام عبر _line_intent
+    # (raw × invoice.exchange_rate)، **لا** _line_intent_base إطلاقاً هنا —
+    # الشراء لا COGS له، وحساب المخزون المحاسبي (لا unit_cost) يُعامَل مثل
+    # Cash/AP تماماً بعملة الفاتورة، مطابقاً للنسخة السابقة حرفياً. الترتيب
+    # محفوظ: Cash/AP → Inventory (بترتيب الظهور) → Tax إن وُجد.
+    line_intents: list[LineIntent] = [_line_intent(cash_or_ap, Decimal("0"), total_purchase + total_tax, invoice.exchange_rate)]
     for inv_acc_id, amount in inventory_debits.items():
-        entry.lines.append(_jline(inv_acc_id, amount, Decimal("0"), invoice.exchange_rate))
+        line_intents.append(_line_intent(inv_acc_id, amount, Decimal("0"), invoice.exchange_rate))
     if total_tax:
-        entry.lines.append(_jline(tax_acc, total_tax, Decimal("0"), invoice.exchange_rate))
+        line_intents.append(_line_intent(tax_acc, total_tax, Decimal("0"), invoice.exchange_rate))
 
-    if not entry.is_balanced():
-        raise PostingError("خطأ داخلي: القيد غير متوازن — لا يُرحّل")
-
-    invoice.status = InvoiceStatus.POSTED
-    session.add(entry)
-    session.flush()
-    invoice.journal_entry_id = entry.id
+    try:
+        entry = post_immediate(session, AccountingIntent(
+            entry_date=invoice.invoice_date, currency_code=invoice.currency_code,
+            exchange_rate=invoice.exchange_rate, source_type="purchase_invoice",
+            description=f"فاتورة شراء رقم {invoice.invoice_no} — {invoice.party_name}",
+            source_id=invoice.id, lines=line_intents,
+        ))
+        for movement in pending_movements:
+            session.add(movement)
+        invoice.status = InvoiceStatus.POSTED
+        invoice.journal_entry_id = entry.id
+        session.flush()
+    except Exception:
+        session.rollback()
+        raise
     return entry
 
 

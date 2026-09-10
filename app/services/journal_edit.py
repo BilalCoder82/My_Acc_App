@@ -58,6 +58,9 @@ class AccountingIntent:
 _NAMESPACE_BY_SOURCE_TYPE = {
     "opening_balance": "JV-OPEN",
     "opening_party_entry": "JV-OPNPTY",
+    "manual": "JV",
+    "sales_invoice": "JE-SAL",
+    "purchase_invoice": "JE-PUR",
 }
 _REVERSAL_NAMESPACE = "JV-REV"
 
