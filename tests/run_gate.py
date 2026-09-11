@@ -63,6 +63,7 @@ REGRESSION_FILES = [
     "tests/test_sales_invoice_boundary_migration.py",
     "tests/test_purchase_invoice_boundary_migration.py",
     "tests/test_real_db_path_no_lock_on_first_post.py",
+    "tests/test_invoice_cancel_boundary_migration.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

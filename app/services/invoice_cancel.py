@@ -12,8 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Invoice, InvoiceStatus, InventoryMovement, MovementDirection,
-    JournalEntry, JournalEntryStatus, JournalLine, SettlementAllocation,
+    JournalEntry, SettlementAllocation,
 )
+from app.services.journal_edit import reverse, JournalEditError
 
 
 class CancelNotAllowedError(Exception):
@@ -53,28 +54,19 @@ def cancel_invoice(session: Session, invoice: Invoice, cancel_date: date) -> Jou
             f"الفاتورة {invoice.invoice_no} أُلغيت أصلاً بالقيد {already_reversed.ref_no}"
         )
 
-    # --- عكس القيد حرفياً: مدين↔دائن، بنفس debit_base/credit_base تماماً
-    # (نفس نمط reverse_manual_entry الموجود فعلياً — journal_edit.py) ---
-    count = session.query(JournalEntry).filter(JournalEntry.ref_no.like("INV-CXL-%")).count()
-    reversal_entry = JournalEntry(
-        entry_date=cancel_date,
-        ref_no=f"INV-CXL-{count + 1:06d}",
-        description=f"إلغاء الفاتورة {invoice.invoice_no}",
-        source_type="invoice_cancel", source_id=invoice.id, is_reversal_of=original_entry.id,
-        currency_code=original_entry.currency_code, exchange_rate=original_entry.exchange_rate,
-        status=JournalEntryStatus.POSTED,
-    )
-    reversal_entry.lines = [
-        JournalLine(
-            account_id=l.account_id, debit=l.credit, credit=l.debit,
-            debit_base=l.credit_base, credit_base=l.debit_base,
-            line_currency_code=l.line_currency_code, line_exchange_rate=l.line_exchange_rate,
-            cost_center=l.cost_center,
+    # --- عكس القيد محاسبياً عبر Boundary (Group 3-C) — بعد نجاح الفحوص
+    # الستة أعلاه فقط، لا قبلها. reverse() تُعيد فحص POSTED/is_reversal_of/
+    # عدم التكرار داخلياً أيضاً (دفاع مزدوج غير ضار، لا حاجة لحذفه) لكنها
+    # لا تعرف شيئاً عن SettlementAllocation — ذاك يبقى هنا حصراً. ---
+    try:
+        reversal_entry = reverse(
+            session, original_entry, reversal_date=cancel_date,
+            description=f"إلغاء الفاتورة {invoice.invoice_no}",
+            source_type="invoice_cancel", source_id=invoice.id,
         )
-        for l in original_entry.lines
-    ]
-    if not reversal_entry.is_balanced():
-        raise CancelNotAllowedError("خطأ داخلي: قيد الإلغاء غير متوازن — لا يُرحّل")
+    except JournalEditError as e:
+        session.rollback()
+        raise CancelNotAllowedError(str(e))
 
     # --- عكس حركات المخزون حرفياً: نفس الكمية ونفس unit_cost الأصلي،
     # اتجاه معاكس فقط — لا إعادة حساب بالمتوسط الحالي (WORKFLOW.md §44.4) ---
@@ -93,8 +85,11 @@ def cancel_invoice(session: Session, invoice: Invoice, cancel_date: date) -> Jou
         for m in original_movements
     ]
 
-    session.add(reversal_entry)
-    session.add_all(reversal_movements)
-    invoice.status = InvoiceStatus.CANCELLED
-    session.flush()
+    try:
+        session.add_all(reversal_movements)
+        invoice.status = InvoiceStatus.CANCELLED
+        session.flush()
+    except Exception:
+        session.rollback()
+        raise
     return reversal_entry

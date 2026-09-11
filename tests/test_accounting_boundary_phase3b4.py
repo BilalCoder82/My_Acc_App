@@ -228,6 +228,65 @@ try:
 except JournalEditError:
     check("رفض source_type بلا namespace مُسجَّل", True)
 
+print("\n== 17) حارس دفاعي: جلسة بتغييرات معلَّقة (بلا commit) على قاعدة **ملف حقيقية** → رفض واضح لا قفل غامض ==")
+import tempfile as _tempfile
+_fd, _file_db_path = _tempfile.mkstemp(suffix=".db")
+os.close(_fd)
+_file_engine = create_engine(f"sqlite:///{_file_db_path}")
+Base.metadata.create_all(_file_engine)
+s17 = sessionmaker(bind=_file_engine)()
+stray = Account(code="999", name_ar="حساب معلَّق", account_type=AccountType.ASSET)
+s17.add(stray)  # session.new غير فارغة عمداً، بلا flush/commit
+try:
+    begin_entry(s17, datetime.date(2026, 1, 1), "USD", D_("1"), "opening_balance", "x")
+    check("رفض حجز الرقم مع وجود تغييرات معلَّقة (ملف حقيقي)", False)
+except JournalEditError as e:
+    check("رفض واضح ومفهوم (لا OperationalError خام)", "تغييرات معلَّقة" in str(e))
+s17.close()
+os.remove(_file_db_path)
+
+print("\n== 18) reverse() API الموسَّعة (Group 3-C) — التوافق العكسي أولاً: القيم الافتراضية تُنتِج نفس السلوك السابق حرفياً ==")
+s18, a18, _, _, b18 = fresh_env()
+orig18 = post_immediate(s18, AccountingIntent(
+    entry_date=datetime.date(2026, 1, 1), currency_code="USD", exchange_rate=D_("1"),
+    source_type="opening_balance", description="x",
+    lines=[LineIntent(account_id=a18.id, debit_raw=D_("10"), debit_base=D_("10")),
+           LineIntent(account_id=b18.id, credit_raw=D_("10"), credit_base=D_("10"))],
+))
+s18.commit()
+rev18_default = reverse(s18, orig18, datetime.date(2026, 1, 2))  # بلا source_type/source_id — يجب أن يبقى كالسابق تماماً
+check("source_type الافتراضي ما زال 'manual_reversal' كما كان دائماً", rev18_default.source_type == "manual_reversal")
+check("source_id الافتراضي None كما كان دائماً", rev18_default.source_id is None)
+
+print("\n== 19) reverse() بـsource_type مخصَّص + source_id صريح — العقد الجديد يعمل ==")
+s19, a19, _, _, b19 = fresh_env()
+orig19 = post_immediate(s19, AccountingIntent(
+    entry_date=datetime.date(2026, 1, 1), currency_code="USD", exchange_rate=D_("1"),
+    source_type="opening_balance", description="x",
+    lines=[LineIntent(account_id=a19.id, debit_raw=D_("10"), debit_base=D_("10")),
+           LineIntent(account_id=b19.id, credit_raw=D_("10"), credit_base=D_("10"))],
+))
+s19.commit()
+rev19 = reverse(s19, orig19, datetime.date(2026, 1, 2), source_type="invoice_cancel", source_id=999)
+check("source_type مُخصَّص طُبِّق فعلياً", rev19.source_type == "invoice_cancel")
+check("source_id مُخصَّص طُبِّق فعلياً", rev19.source_id == 999)
+check("ما زالت تحجز من نفس namespace JV-REV بصرف النظر عن source_type", rev19.ref_no.startswith("JV-REV-"))
+
+print("\n== 20) العقد المفروض: source_type مخصَّص بلا source_id → رفض صريح (لا سجل غير قابل للتتبع) ==")
+s20, a20, _, _, b20 = fresh_env()
+orig20 = post_immediate(s20, AccountingIntent(
+    entry_date=datetime.date(2026, 1, 1), currency_code="USD", exchange_rate=D_("1"),
+    source_type="opening_balance", description="x",
+    lines=[LineIntent(account_id=a20.id, debit_raw=D_("10"), debit_base=D_("10")),
+           LineIntent(account_id=b20.id, credit_raw=D_("10"), credit_base=D_("10"))],
+))
+s20.commit()
+try:
+    reverse(s20, orig20, datetime.date(2026, 1, 2), source_type="invoice_cancel")  # بلا source_id عمداً
+    check("رفض source_type مخصَّص بلا source_id", False)
+except JournalEditError as e:
+    check("رفض source_type مخصَّص بلا source_id", "source_id" in str(e))
+
 print("\n" + "=" * 70)
 print(f"النتيجة: {sum(1 for _, c in results if c)}/{len(results)} نجح")
 print("=" * 70)

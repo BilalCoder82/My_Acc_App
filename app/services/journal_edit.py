@@ -102,6 +102,20 @@ def _reserve_ref_no(session: Session, namespace: str) -> str:
     is_memory = not db_path or db_path == ":memory:" or "mode=memory" in str(db_path)
 
     if not is_memory:
+        if session.dirty or session.new or session.deleted:
+            # PHASE3B4/Group 3-B — تحصين اكتُشفت الحاجة له فعلياً (لا نظرياً):
+            # فتح اتصال مستقل بينما الـSession الرئيسية تحمل تغييرات معلَّقة
+            # (flush بلا commit) يُصادم فعلياً مع قفل SQLite (BEGIN IMMEDIATE
+            # يفشل بـ"database is locked" — أُعيد إنتاجه ومُصلَح بمصدره
+            # بـposting.py). بدل ترك الاكتشاف لخطأ SQLite غامض لاحقاً (كما
+            # حدث فعلياً)، رفض صريح وواضح الآن — يُلزم أي مستدعٍ مستقبلي
+            # (cancel_invoice القادمة، أو غيرها) بتنظيف الجلسة أولاً، بدل
+            # اكتشاف المشكلة عرَضياً فقط عبر قاعدة ملف حقيقية لاحقاً.
+            raise JournalEditError(
+                "لا يمكن حجز ref_no والجلسة تحوي تغييرات معلَّقة غير مثبَّتة (flush بلا commit) — "
+                "هذا يُصادم فعلياً مع الاتصال المستقل المطلوب بـ§4 على قواعد بيانات ملف حقيقية. "
+                "نظّف الجلسة (session.commit()) قبل استدعاء begin_entry()/post_immediate()."
+            )
         conn = sqlite3.connect(db_path, timeout=30)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -259,18 +273,30 @@ def post_immediate(session: Session, intent: AccountingIntent) -> JournalEntry:
 
 
 def reverse(session: Session, original_entry: JournalEntry, reversal_date: date,
-            description: str | None = None) -> JournalEntry:
+            description: str | None = None, source_type: str = "manual_reversal",
+            source_id: int | None = None) -> JournalEntry:
     """العكس العام (§3 بالمواصفة). يحجز الرقم من namespace "JV-REV" عبر
-    Sequence Table.
+    Sequence Table — نفس namespace بصرف النظر عن source_type (كل عكوس
+    المحاسبة العامة تشترك "JV-REV"، هذا ليس تعدداً لمصادر الترقيم).
 
-    **تحديث (كان تحذيراً، أصبح موثَّقاً كمُغلَق)**: كانت reverse_manual_entry()
-    أدناه تحجز من نفس الـprefix بآلية LIKE/COUNT منفصلة تماماً — أُصلِح هذا
-    بتوحيد مصدر الترقيم (raise reverse_manual_entry أدناه تستخدم الآن
-    _reserve_ref_no بنفس namespace "JV-REV" — لا مصدرَي حقيقة بعد الآن).
-    راجع tests/test_jv_rev_namespace_reconciliation.py للسيناريو الذي أثبت
-    المشكلة أولاً ثم أثبت الإصلاح. ملاحظة نطاق تبقى صحيحة: هذا توحيد رقم
-    فقط، لا نقل reverse_manual_entry() لهذه الدالة (reverse) ولا للـBoundary
-    عموماً — تبقى دالة مستقلة، فقط تشارك الآن نفس مصدر الأرقام."""
+    Group 3-C: source_type/source_id أصبحا معاملين اختياريين — الافتراضي
+    "manual_reversal"/None يحافظ على السلوك السابق للعكس اليدوي العام
+    حرفياً بلا تغيير. أي مستدعٍ (invoice_cancel.py وغيره لاحقاً) يمرّر
+    source_type مختلفاً **يجب** أن يمرّر source_id معه أيضاً — العقد هنا
+    صريح ومفروض، لا اختياري للراحة: لا يجوز قيد عكسي يذكر مصدراً
+    (source_type != الافتراضي) بلا ربط فعلي بكائن ذلك المصدر (source_id)،
+    لأن ذلك يُنتِج سجلاً غير قابل للتتبع. الـBoundary هنا لا يعرف شيئاً عن
+    معنى source_type/source_id لأي دومين — فقط يخزّنهما كما وردا، طالما
+    العقد أعلاه محقَّق.
+
+    ملاحظة تاريخية: reverse_manual_entry() القديمة بـjournal_edit.py كانت
+    تحجز من نفس الـprefix بآلية LIKE/COUNT منفصلة — أُصلِح بتوحيد مصدر
+    الترقيم (راجع tests/test_jv_rev_namespace_reconciliation.py)."""
+    if source_type != "manual_reversal" and source_id is None:
+        raise JournalEditError(
+            f"source_type='{source_type}' يتطلب source_id صريحاً — لا يجوز قيد عكسي "
+            "بمصدر موصوف بلا ربط فعلي بكائنه (سجل غير قابل للتتبع)"
+        )
     if original_entry.status != JournalEntryStatus.POSTED:
         raise JournalEditError(f"القيد {original_entry.ref_no} غير مرحّل — لا يوجد ما يُعكس")
     if original_entry.is_reversal_of is not None:
@@ -291,7 +317,7 @@ def reverse(session: Session, original_entry: JournalEntry, reversal_date: date,
     reversal = JournalEntry(
         entry_date=reversal_date, ref_no=ref_no,
         description=description or f"عكس القيد {original_entry.ref_no}",
-        source_type="manual_reversal", is_reversal_of=original_entry.id,
+        source_type=source_type, source_id=source_id, is_reversal_of=original_entry.id,
         currency_code=original_entry.currency_code, exchange_rate=original_entry.exchange_rate,
         status=JournalEntryStatus.POSTED,
     )
