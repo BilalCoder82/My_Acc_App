@@ -365,62 +365,17 @@ def _validate_lines(entry: JournalEntry) -> None:
 
 def reverse_manual_entry(session: Session, original_entry: JournalEntry,
                           reversal_date, description: str | None = None) -> JournalEntry:
-    """يعكس قيداً يدوياً مرحّلاً — نفس مبدأ post_return للفواتير بالضبط
-    (عكس دقيق، لا إعادة حساب). كل سطر يعكس مدين/دائن بنفس العملة وسعر
-    الصرف وقيمة التعادل الأساسي الأصليين تماماً — القيد المعكوس لا يُعاد
-    تسعيره بسعر صرف اليوم إطلاقاً، لأن سعر الصرف المحفوظ لقطة تاريخية
-    ثابتة (نفس مبدأ QuickBooks Snapshot Exchange Rate).
-
-    قاعدتان إضافيتان صارمتان:
-    - لا يجوز عكس قيد هو نفسه عكس لقيد آخر (لا نعكس العكوس)
-    - لا يجوز عكس نفس القيد الأصلي مرتين (عكس واحد فقط لكل قيد)
-    """
-    if original_entry.status != JournalEntryStatus.POSTED:
-        raise JournalEditError(f"القيد {original_entry.ref_no} غير مرحّل — لا يوجد ما يُعكس")
-    if original_entry.is_reversal_of is not None:
-        raise JournalEditError(
-            f"القيد {original_entry.ref_no} هو نفسه قيد عكسي — لا يجوز عكس قيد عكسي. "
-            "لعكس الأثر، أنشئ قيداً تصحيحياً جديداً بدلاً من ذلك."
-        )
-    existing_reversal = session.query(JournalEntry).filter_by(
-        is_reversal_of=original_entry.id
-    ).first()
-    if existing_reversal is not None:
-        raise JournalEditError(
-            f"القيد {original_entry.ref_no} مُعكوس أصلاً بالقيد {existing_reversal.ref_no} — "
-            "لا يجوز عكسه مرة ثانية."
-        )
-
-    # PHASE3B4 — إصلاح مُصرَّح به صراحة (نطاق ضيق، ليس Migration): يوحّد
-    # مصدر ترقيم JV-REV مع journal_edit.py::reverse() الجديدة عبر نفس
-    # _reserve_ref_no()/journal_number_sequences، بدل COUNT/LIKE القديمة
-    # التي أثبت الاختبار الفعلي (tests/test_jv_rev_namespace_reconciliation.py)
-    # أنها تتصادم معها (UNIQUE collision مُعاد إنتاجه فعلياً بترتيب new→old→new).
-    # لا نقل لهذه الدالة إلى الـBoundary — فقط توحيد الرقم نفسه.
-    ref_no = _reserve_ref_no(session, _REVERSAL_NAMESPACE)
-    reversal = JournalEntry(
-        entry_date=reversal_date,
-        ref_no=ref_no,
-        description=description or f"عكس القيد {original_entry.ref_no}",
-        source_type="manual_reversal", is_reversal_of=original_entry.id,
-        currency_code=original_entry.currency_code, exchange_rate=original_entry.exchange_rate,
-        status=JournalEntryStatus.POSTED,
-    )
-    reversal.lines = [
-        JournalLine(
-            account_id=l.account_id, debit=l.credit, credit=l.debit,
-            debit_base=l.credit_base, credit_base=l.debit_base,
-            line_currency_code=l.line_currency_code, line_exchange_rate=l.line_exchange_rate,
-            cost_center=l.cost_center,
-        )
-        for l in original_entry.lines
-    ]
-    if not reversal.is_balanced():
-        raise JournalEditError("خطأ داخلي: قيد العكس غير متوازن — لا يُرحّل")
-
-    session.add(reversal)
-    session.flush()
-    return reversal
+    """Final 3B-4 corrective patch — أصبحت غلافاً رفيعاً (thin wrapper) فوق
+    reverse() حصراً، لا مصدر ثانٍ لمنطق العكس بعد الآن. يحافظ على نفس
+    التوقيع والسلوك الملحوظ تماماً لكل المستدعين الحاليين
+    (reverse_opening_account_balances، reverse_opening_inventory):
+    source_type="manual_reversal"، source_id=None — نفس provenance
+    القديمة حرفياً، بلا تغيير. الفائدة: تحقق reversal_date (>= تاريخ
+    الأصل) أصبح موحَّداً تلقائياً عبر كل مستدعي هذه الدالة أيضاً — كان
+    غائباً هنا سابقاً بينما موجود بـreverse() الجديدة، تعارض قواعد حقيقي
+    اكتُشف بمراجعة Final Gate وأُغلِق هنا."""
+    return reverse(session, original_entry, reversal_date, description=description,
+                    source_type="manual_reversal", source_id=None)
 
 
 def add_manual_line(session: Session, entry: JournalEntry, account_id: int,

@@ -2714,3 +2714,47 @@ migration إضافية. **مُختبَرة عبر مساري ORM (قاعدة ط�
 أخرى غير Refund الحالي (تقارير أعمار ديون الموردين مثلاً)، **يجب أن
 تُعيد فحص هذه النقطة تحديداً أولاً** قبل الاعتماد على الدالة بنطاق
 أوسع — لا تُفترَض دقتها الكاملة لأي مورد له تاريخ مرتجعات.
+
+## §70 — PHASE 3B-4 مُغلَقة رسمياً (CLOSED): Accounting Posting Boundary
+
+Group 1 (Opening Balances + Opening Party) → Group 2 (Manual Journal
+Voucher) → Group 3-A (Sales Invoice) → Group 3-B (Purchase Invoice) →
+Group 3-C (Invoice Cancellation) — كل دومين هُوجِر بترتيب §6 المُقفَل،
+بمقارنة Characterization حقلاً بحقل قبل/بعد لكل دومين (صفر اختلافات
+غير مفسَّرة في كل حالة)، واختبارات Boundary مستقلة، وFull
+Regression/Fuzz بعد كل خطوة.
+
+**تصحيح أخير قبل الإغلاق (Final Gate)**: `reverse_manual_entry()` كانت
+لا تزال تبني `JournalEntry`/`JournalLine` بنفسها يدوياً — مصدر ثانٍ
+لمنطق العكس، بفجوة حقيقية (لا تتحقق من `reversal_date >= original
+.entry_date`، خلافاً لـ`journal_edit.reverse()`). حُوِّلت إلى غلاف رفيع
+(thin wrapper) فوق `reverse()` حصراً، بنفس `source_type="manual_reversal"`/
+`source_id=None` المحفوظتين حرفياً (لا تغيير على provenance القديمة
+لأي مستدعٍ حالي: `reverse_opening_account_balances`،
+`reverse_opening_inventory`). 14 اختباراً دائماً جديداً
+(`tests/test_reverse_manual_entry_wrapper.py`) يثبت التكافؤ الكامل +
+تحقق التاريخ الموحَّد الآن + عدم استهلاك رقم عند فشل مبكر.
+
+**Namespaces النهائية الست، كل واحد له أداة backfill/seed مُختبَرة**:
+`JV` (Manual)، `JV-OPEN` (Opening Balances)، `JV-OPNPTY` (Opening
+Party)، `JV-REV` (كل العكوس العامة — Manual/Opening Party/Invoice
+Cancel معاً)، `JE-SAL` (Sales)، `JE-PUR` (Purchase). `INV-CXL` أصبح
+namespace تاريخياً متروكاً بالكامل — لا قيد جديد يُنشَأ به بعد الآن،
+موثَّق صراحة داخل `app/services/invoice_cancel.py` نفسها.
+
+**Technical Debt مُسجَّل صراحة، مؤجَّل عمداً — لا يُصلَح الآن**:
+`post_opening_account_balances()`/`post_opening_party_entry()` لا
+تملكان `try/except: session.rollback(); raise` الصريح الذي تملكه
+دوال Group 3 (Sales/Purchase/Cancel) — تعتمدان على العقد الأقدم
+("المستدعي مسؤول عن commit/rollback"). **القرار**: لا نوحّد سياسة
+ملكية الـtransaction انتقائياً الآن؛ يُحسَم مركزياً عند بناء طبقة
+Service/Workflow لاحقاً لكل الخدمات معاً، لا دومين بدومين.
+
+**خارج نطاق 3B-4 دائماً، بقرار مُقفَل من البداية، لا نسيان**: `returns.py`
+(Sales/Purchase Return)، `settlements.py` (Receipt/Payment/Refund)،
+`app/services/opening_balances.py::post_opening_inventory`/
+`reverse_opening_inventory` (Domain 2 — لم يكن مُقرَّراً ضمن هذه
+المرحلة أصلاً)، و`posting.py::post_return` (كود ميت مؤكَّد، صفر Call
+Sites، مُستبعَد للـCleanup مستقبلاً).
+
+Full Regression النهائي: 42/42 ملفاً. Fuzz: 200/200. Gate: PASS.

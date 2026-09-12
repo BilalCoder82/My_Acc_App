@@ -4,6 +4,19 @@ app/services/invoice_cancel.py
 Cancel/Reverse للفواتير — راجع WORKFLOW.md §44 للقاعدة الكاملة قبل تعديل
 أي شيء هنا. Cancel ≠ Return: عكس حرفي بالقيم التاريخية نفسها، لا حدث
 تجاري جديد ولا إعادة حساب.
+
+PHASE3B4/Group 3-C: القيد العكسي يُبنى الآن عبر journal_edit.py::reverse()
+(Accounting Posting Boundary) بدل بناء يدوي داخلي — namespace الترقيم
+تبع لذلك من "INV-CXL" الحصري إلى "JV-REV" المشترك مع كل عكوس المحاسبة
+العامة (نفس namespace الذي يستخدمه reverse_opening_party_entry والعكس
+اليدوي العام). هذا تغيير مقصود في بنية الترقيم، وافق عليه Gate Review.
+
+**"INV-CXL-NNNNNN" أصبح namespace تاريخياً (legacy) متروكاً بالكامل —
+لا يُستخدَم لأي قيد جديد بعد الآن، ولا توجد أي جهة بالكود تولّد أرقاماً
+بهذه الصيغة بعد اكتمال هذه الهجرة.** يبقى ظاهراً فقط على القيود القديمة
+الموجودة فعلاً بقواعد بيانات العملاء (قبل هذه الهجرة) — لا Migration ولا
+Backfill مطلوب له تحديداً (خلافاً لـJV/JV-REV/JE-SAL/JE-PUR/JV-OPEN/
+JV-OPNPTY)، لأنه لن يُستكمَل أو يُقارَن به أي رقم جديد مطلقاً.
 """
 from __future__ import annotations
 from datetime import date
