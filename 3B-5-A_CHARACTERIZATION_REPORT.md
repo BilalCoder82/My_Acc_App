@@ -1,69 +1,109 @@
-# PHASE 3B-5-A — Characterization Report
-Scope: read-only code reconnaissance + `tests/test_characterization_3b5a.py` (5/5 PASS against the real code, no production files touched). No fixes proposed here — this is "what the system actually does today."
+# PHASE 3B-5-A — Characterization Report (v2, full scope)
+
+Scope: read-only reconnaissance of the actual code in this archive + `tests/test_characterization_3b5a.py` (8/8 PASS, re-run against this exact tree before delivery). **Zero production code changes.**
+
+## 0. Version reference status
+This report and its tests are built directly against `My_Acc_App_PHASE3B4_CLOSED.zip` as supplied. §70 in `WORKFLOW.md` already documents, in its own words, that `returns.py`, `settlements.py`, `opening_balances.py::post_opening_inventory/reverse_opening_inventory`, and `posting.py::post_return` were **deliberately out of scope for 3B-4 from the start** (post_return confirmed here as dead code, zero call sites). No documentation gap exists — the earlier concern about an undocumented scope boundary does not apply to this archive.
 
 ## 1. InventoryMovement lifecycle
-`InventoryMovement` (models.py) is an append-only fact table: `item_id, warehouse_id, direction, quantity, unit_cost, movement_date, source_type, source_id`. There is **no `created_at`/insertion-timestamp column** — only the business-meaningful `movement_date`, which callers can set to any date (including a backdate). No status/void flag. It is created by four call sites: `post_sales_invoice`, `post_purchase_invoice` (posting.py), `post_sales_return`/free-return path (returns.py), opening balances/opening inventory, and the two reversal paths (`invoice_cancel.py`, `opening_balances.reverse_opening_inventory`). No code path ever `UPDATE`s or `DELETE`s an existing row (confirmed by grep + characterization check #4) — the only correction pattern in the codebase is an **additive mirror reversal** (new opposite-direction row at the same historical `unit_cost`), never in-place mutation.
+Append-only fact table (`item_id, warehouse_id, direction, quantity, unit_cost, movement_date, source_type, source_id, note`). No status/void flag, no `created_at`. `movement_date` is typed `DateTime` in the schema, but every caller feeds it a plain `date` (Invoice.invoice_date is `Date`) — so in practice the time component is always midnight; the column's extra time resolution is never actually used as an implicit ordering signal. Created by exactly six call sites: `post_sales_invoice`, `post_purchase_invoice`, `post_sales_return`, `post_purchase_return`, `post_opening_inventory`, `transfer_stock`. Never updated or deleted anywhere (confirmed by grep, check #4); the only "undo" pattern is an additive mirror-reversal (`invoice_cancel.py`, `opening_balances.reverse_opening_inventory`). No path allows creating a movement with an invalid/missing source — `source_type`/`source_id` are always set by the six creators, never left null except by construction contract (opening balances use a fixed `source_type` with no originating document). A movement can always be created with a `movement_date` earlier than existing POSTED movements — nothing in the schema or any creator function checks this.
 
 ## 2. Average-cost algorithm
-`get_item_stock_summary()` (item_queries.py) is the **single source** for average cost — `posting.py`, `returns.py`, and `inventory_transfer.py` all call it (or its thin wrapper `_average_cost`), no duplicate implementation exists. It is a **full recompute from scratch on every call**: pulls every `InventoryMovement` row for the item (optionally filtered by warehouse), orders by `movement_date`, and accumulates `total_qty`/`total_cost` — IN adds `qty*unit_cost`, OUT subtracts `qty*movement.unit_cost` (the OUT's own stored historical cost, not a re-derived average). Final `avg = total_cost/total_qty`. There is **no cached running balance, no incremental update, no per-date snapshot** — confirmed by characterization check #1.
+`get_item_stock_summary()` (item_queries.py) is the single implementation — full recompute from scratch on every call, no cache/running balance (check #1). Available quantity and value are accumulated by iterating every `InventoryMovement` row for `(item_id[, warehouse_id])` ordered by `movement_date` only: IN adds `qty×unit_cost`; OUT subtracts `qty×that_movement's_own_stored_unit_cost` (never a re-derived average). Opening inventory, purchases, sales-return-ins, and transfer-ins are all just IN rows to this algorithm — indistinguishable by source once created. Multiple warehouses are isolated only because every accounting call site passes an explicit `warehouse_id`; `None` is accepted solely by two UI-display call sites for an aggregate view, never for a costing decision (confirmed, check #6 proves zero cross-warehouse leakage).
 
-## 3. COGS calculation
-`post_sales_invoice` calls `_average_cost()` **before** adding the new OUT movement, uses that value as `unit_cost` for the new movement, and books `COGS = unit_cost × qty` via `_jline_base` (already-base-currency path — this is the exact quantity that the §29/§30 double-conversion bug attacked previously, now fixed and regression-locked). COGS is computed once, at posting time, and never revisited afterward for that document.
+## 3. What happens with several movements sharing item+warehouse+movement_date (Finding B)
+The query is `order_by(InventoryMovement.movement_date)` with **no secondary key**. Confirmed by check #2 and #7's setup: two same-date movements are processed in whatever order the DB returns them for a tied sort key — which happens to match insertion order under SQLite's simple scan in every case tested here, but nothing in the query enforces it. `id` **is** available (auto-increment primary key) and, empirically, tracks insertion order — but insertion order is not necessarily business-chronological order (e.g., a backdated correction entered later still gets a higher `id`). No `created_at` or independent sequence column exists. **This is a design decision to make before Historical Recalculation, not something to default to `id` for without a conscious choice.**
 
-## 4. How cost is affected by an old movement
-Because average cost is a full recompute over *all* rows ordered by `movement_date` at the moment of the call, a movement dated in the past **does** affect the average returned by the next call — but only for movements *not yet posted*. Any movement already posted **before** the backdated one was inserted keeps its own already-stored `unit_cost` forever (see item 8).
+## 4. COGS
+`post_sales_invoice` calls the average-cost function **before** adding its own OUT movement, uses that value as the new movement's `unit_cost`, books `COGS = unit_cost × qty` in base currency via `_jline_base`. Computed once, at posting time, never revisited. **No existing mechanism recalculates COGS after a historical movement is inserted** (Finding A, below). If a historical purchase changes what the "true" average should have been, the already-POSTED sale's COGS and journal entry are simply never touched — confirmed live, not inferred (check #3).
 
-## 5. Editing/canceling/deleting historical movements
-There is no direct edit or delete of `InventoryMovement`. The only sanctioned "undo" mechanisms are: (a) `invoice_cancel.py::cancel_invoice()` — literal reversal at the original invoice's own movements' exact historical cost, blocked if any `Settlement` is linked; (b) `opening_balances.py::reverse_opening_inventory()` — same additive-mirror pattern, **with a guard** (see item 14). Editing a POSTED invoice's line items directly is blocked entirely by `invoice_edit.py::ensure_editable()` — the documented-only path is cancel-then-recreate.
+## 5. Purchase cost
+`unit_price` on an `InvoiceLine` is entered in the invoice's own currency; posting converts to base currency via `exchange_rate` before it becomes `InventoryMovement.unit_cost` — `unit_cost` is always stored in base currency, confirmed by reading `_jline_base` usage in `post_purchase_invoice`. A later/historical purchase never retroactively recomputes anything already posted (same asymmetry as COGS — it only affects what future `get_item_stock_summary()` calls return).
 
-## 6. Ordering movements chronologically
-Sorting key is `InventoryMovement.movement_date` **only** — `item_queries.py`: `query.order_by(InventoryMovement.movement_date)`. No secondary tie-breaker (no `id`, no `created_at`) for same-date rows. Characterization check #2 confirms the query has no such tiebreaker; current same-date behavior happens to match insertion order under SQLite's unindexed scan, but that is incidental, not contracted.
+## 6. Returns cost (Finding C)
+Linked returns (`_return_unit_cost`) query `InventoryMovement` by `(source_type, source_id, item_id)` and take `.first()`. **Confirmed live** (check #8): an invoice with two separate lines for the same item produces two distinct `InventoryMovement` rows sharing the same `(source_id, item_id)` key, and `_return_unit_cost()` returns whichever one the DB happens to return first — with no line-level disambiguation. This is a plain correctness issue, independent of Historical Corrections; recorded as **RETURNS-COST-001**, not absorbed into 3B-5 scope. Unlinked (free) returns fall back to the current average at return time — a documented, deliberate approximation, not a bug.
 
-## 7. Warehouse effect
-Fully isolated per `(item_id, warehouse_id)` since §46 — `_average_cost()` takes no default for `warehouse_id`, forcing every accounting call site to be explicit. `warehouse_id=None` is accepted only by the two UI display call sites (`item_card_dialog.py`, `item_list_view.py`) for an aggregate "total across all warehouses" view — never used by a posting/costing decision. `inventory_transfer.py` correctly uses the *source* warehouse's own average for the transfer-out leg.
+## 7. Opening inventory
+Structurally identical to a purchase IN as far as the costing algorithm is concerned. Idempotent at the whole-company level (`Setting['opening_inventory_posted_at']` — one shot for the entire company, not per item/warehouse), matching `post_opening_account_balances()`'s pattern exactly. Its only special treatment anywhere is the reversal guard (item 9 below).
 
-## 8. Quantity/unit_cost effect
-Confirmed concretely by characterization check #3: a purchase dated *before* an already-posted sale, but **entered into the system after** that sale was posted, does not retroactively touch the sale's stored `unit_cost` or its journal entry. The sale keeps the average that existed at its own posting time. This is the literal reproduction of the 3B-5 problem statement, not a hypothetical.
+## 8. Stock transfer (Finding D — new, not previously flagged)
+`transfer_stock()` creates an OUT at the source warehouse and an IN at the destination, both priced at the source warehouse's **current** average cost at the moment of the transfer call — never a point-in-time average as of `transfer_date`. **Confirmed live** (check #7): a transfer backdated to a date when the true average was 10 is still costed at 15 (today's average, after a later purchase changed it). This is the exact same historical-costing asymmetry as Finding A (purchases/sales), but for an internal movement — worth folding into the same 3B-5-C design discussion rather than treated as unrelated. No `JournalEntry` is ever created for a transfer (confirmed: `inventory_transfer.py` imports neither `JournalEntry` nor `post_immediate`) — it is a pure inventory-quantity/cost movement with zero accounting-boundary involvement.
 
-## 9. Purchase/sales returns impact
-Linked returns read cost from the **original movement itself** (`returns.py::_return_unit_cost`, exact match via `source_type in (sales_invoice, purchase_invoice)` + `source_id`) — historically accurate by construction. Free (unlinked) returns fall back to the *current* average at return time — documented as a deliberate, acceptable approximation (no original document to be precise against). **Known gap not previously flagged**: the linked-return lookup uses `.first()` on `(source_id, item_id)` — if one invoice has two separate lines for the same item (legal today, nothing prevents it), the return will silently pick whichever movement the query happens to return first, not necessarily the line actually being returned.
+## 9. Warehouse isolation
+Confirmed live (check #6): identical item, cost 10 in warehouse A vs. 999 in warehouse B, each warehouse's average reflects only its own movements — no leakage either direction.
 
-## 10. Opening inventory impact
-Opening inventory postings are indistinguishable from a normal IN movement to the costing algorithm — same table, same accumulation. The only place opening balances get special treatment is the reversal guard (item 14).
+## 10. Historical Purchase — REQUIRED CHARACTERIZATION (Finding A, the core finding)
+Scenario reproduced exactly as specified and confirmed live (check #3):
+- Opening/purchase at T2, average = 10.
+- Sale at T3 (T3 > T2), POSTED, COGS booked at unit_cost = 10.
+- A purchase entered later (in real time) but dated T1 < T3, at a very different price.
 
-## 11. Any path that can change a POSTED historical movement's result
-None directly (no update/delete). Indirectly: inserting a **new** movement with an earlier `movement_date` changes what `get_item_stock_summary()` will return for *future* calls, but never retroactively changes a value already written to a prior `InventoryMovement.unit_cost` or a prior `JournalEntry`. This asymmetry — past unposted-order inserts affect the future, never the past — is the core fact 3B-5-B/C has to design around.
+Result:
+- The Sale's stored `InventoryMovement.unit_cost` and its `JournalEntry` **do not change** — confirmed unchanged before/after.
+- The old purchase's `InventoryMovement` doesn't change; the new T1 purchase's own movement is created normally.
+- No automatic recalculation occurs anywhere — there is no code path that reacts to a movement being inserted with an earlier date than existing POSTED movements.
+- **No historical-correction mechanism currently exists.** The only "correction" primitive in the whole codebase is additive mirror-reversal of an entire document (cancel/reverse), never a targeted re-price of downstream effects.
+- Final state of POSTED documents: unchanged and self-consistent with their own posting-time inputs, but no longer consistent with what a strict chronological average-cost method would say in hindsight. This divergence is permanent until a 3B-5-C mechanism is designed.
 
-## 12. Existing recalculation mechanisms
-There is exactly **one** codified "would this recalculation break something already relying on it" guard in the entire codebase: `opening_balances.py::reverse_opening_inventory()`, which blocks the reversal if any OUT movement exists for that `(item, warehouse)` dated on/after the opening date. It is scoped narrowly to opening-inventory reversal only. There is **no equivalent guard** anywhere for cancelling/editing a mid-stream purchase invoice that a later sale's average already depended on (confirmed by check #5) — `cancel_invoice()` will happily reverse a purchase even if a sale already consumed stock priced from it.
+## 11. POSTED Immutability
+`invoice_edit.py::ensure_editable()` blocks direct edits to a POSTED invoice's lines outright — the only sanctioned path is cancel (additive reversal) + re-create. No code path mutates a POSTED `JournalEntry` in place anywhere in the services layer (confirmed by the same grep used for check #4, extended to `JournalEntry`). Any future Historical Correction mechanism therefore has no existing "quiet edit" precedent to build on or accidentally imitate — a corrective accounting effect, if needed, would have to go through the same accounting-posting boundary as everything else (`post_immediate`/`reverse`), not a direct field mutation. This constraint is not new work to build; it's an existing invariant to preserve.
 
-## 13. All callers
-`get_item_stock_summary`: `posting.py` (`_average_cost`), `returns.py` (`_average_cost`, `_return_unit_cost` fallback), `inventory_transfer.py`, plus two UI display call sites (aggregate view only, `warehouse_id=None`). No other caller exists in `app/services` or `app/ui`.
+## 12. Production callers (full inventory)
 
-## 14. Current transaction boundaries
-Posting functions (`post_sales_invoice`/`post_purchase_invoice`) do an explicit `session.commit()` mid-function (§Group 3-B fix, to avoid the documented SQLite lock issue with `post_immediate`'s independent ref-no reservation transaction), then build everything else in memory and commit again atomically in the `try/except` around `post_immediate`. `InventoryMovement` rows are only `session.add()`-ed **after** `post_immediate()` succeeds, specifically to avoid orphaned movements on a failed journal post. This ordering matters for 3B-5-B/C: any new "impact analysis" step that reads current stock state must do so either fully before this mid-function commit or account for the fact that a stale read across it is possible in theory (not observed as a bug, just a structural note).
+| File | Function | Responsibility | Transaction ownership |
+|---|---|---|---|
+| posting.py | `post_sales_invoice` | Sale posting: average-cost read → OUT movement → COGS via `post_immediate` | mid-function `session.commit()` (ref-no lock avoidance), then atomic try/except around `post_immediate` |
+| posting.py | `post_purchase_invoice` | Purchase posting: IN movement (base-currency cost) → `post_immediate` | same pattern as above |
+| posting.py | `_average_cost` | Thin wrapper over `get_item_stock_summary` | none (read-only) |
+| posting.py | `post_return` | **Dead code** — zero callers anywhere | n/a |
+| returns.py | `post_sales_return` / `post_purchase_return` | Return posting, own direct `JournalEntry`+`_next_ref_no` (pre-Boundary, out of 3B-4 scope by design) | caller owns commit/rollback (older contract) |
+| returns.py | `_return_unit_cost` | Linked-return cost lookup (`.first()`, Finding C) / unlinked fallback to current average | none (read-only) |
+| returns.py | `get_returnable_lines` | Same `.first()`-style pattern for quantity already returned | none (read-only) |
+| item_queries.py | `get_item_stock_summary` | The one and only average-cost/COGS-input calculation | none (read-only), O(n) per call, no cache |
+| inventory_transfer.py | `transfer_stock` | Internal movement, current-average pricing (Finding D), no accounting effect | own `session.flush()`, no commit |
+| opening_balances.py | `post_opening_inventory` | Company-wide, one-shot IN movements | caller owns commit/rollback |
+| opening_balances.py | `reverse_opening_inventory` | Additive mirror-reversal, **guarded** (item 13) | caller owns commit/rollback |
+| invoice_cancel.py | `cancel_invoice` | Uses `journal_edit.reverse()` (the Boundary) for the accounting side, plus its own inventory-reversal movements | atomic try/except |
+| item_card_dialog.py / item_list_view.py (UI) | display only | Call `get_item_stock_summary` with `warehouse_id=None` for an aggregate view | n/a |
 
-## 15. Current performance characteristics
-`get_item_stock_summary()` is **O(n) in total historical movement count for that item(/warehouse)**, on every single call, with no caching. It already re-runs on every invoice line at posting time (once per line via `_average_cost`), and again on every return, transfer, and UI display of the item. For a client with years of high-volume movements per item, this will get measurably slower over time — not a bug today, but relevant input to 3B-5-C's "do we need a recalculation policy / background job" question, per the explicit "not now, only when size actually demands it" instruction.
+## 13. Existing recalculation / historical-safety mechanisms
+Exactly one exists in the whole codebase: `opening_balances.py::reverse_opening_inventory()` blocks its own reversal if any OUT movement exists for that `(item, warehouse)` dated on/after the opening date. Scoped narrowly to opening-inventory reversal only — **no equivalent guard exists for cancelling a purchase invoice that a later sale's average already depended on**, nor for the transfer asymmetry in Finding D.
 
-## Identified invariants (confirmed, not assumed)
-- InventoryMovement is append-only; no code path mutates a posted row in place.
-- OUT movements are always valued at their own stored `unit_cost`, never a re-derived average (§39, re-verified live).
-- Average cost is isolated per `(item, warehouse)`, with `None` reserved for display-only aggregation.
-- Linked returns reprice from the exact original movement; unlinked returns use current average by design, documented as an approximation.
+## Characterization Test Results
+`tests/test_characterization_3b5a.py` — 8/8 PASS against this exact archive:
+1. Average cost = full O(n) recompute, no cache.
+2. No secondary sort key for same-`movement_date` rows.
+3. **Test A** — late historical purchase does not retroactively touch an already-posted sale's COGS/unit_cost.
+4. No update/delete of any `InventoryMovement` anywhere.
+5. The one existing "later movement depends on this" guard is scoped to opening-inventory only.
+6. Warehouse isolation — zero leakage between warehouses for the same item.
+7. Stock-transfer backdating prices at today's average, not the historical one (Finding D).
+8. **Test C** — multi-line-same-item invoice makes `_return_unit_cost()`'s `.first()` pick an arbitrary line (RETURNS-COST-001).
 
-## Known gaps (newly surfaced by this reconnaissance, not previously documented)
-1. No secondary sort key for same-`movement_date` rows in the costing query (item 6).
-2. `_return_unit_cost`'s linked-return lookup can pick the wrong line's movement when an invoice has duplicate item lines (item 9).
-3. The "later movement already depended on this" guard exists only for opening-inventory reversal, not generalized (item 12) — this is precisely the gap 3B-5-C is being opened to close.
-4. No historical audit trail of *who/when* entered a backdated movement, or that it was backdated at all, beyond the `movement_date` itself — relevant to whatever 3B-5-C decides about detecting and surfacing historical corrections to the accountant.
+(Test B — same-date ordering — is check #2 above; no independent tiebreaker exists to test beyond confirming its absence.)
 
-## Proposed 3B-5 boundaries (informational only — decision stays with you and the programmer)
-Reconnaissance surfaced nothing that changes your original plan; A/B/C/D as scoped in your message look consistent with what's actually in the code. The one thing I'd flag before 3B-5-C is designed: gap #3 above (missing guard) and gap #2 (duplicate-item-line return ambiguity) are two **separate risk classes** — the first is "recalculation policy" (your 3B-5-C), the second is a plain correctness bug candidate unrelated to historical corrections at all. Worth deciding explicitly whether #2 is in scope for 3B-5 or tracked separately, so it doesn't get silently folded into (or lost inside) the bigger historical-correction design.
+## Findings (kept explicitly separate as requested)
+- **Finding A** — Historical late purchase/transfer does not currently retroactively recalculate already-posted downstream COGS or transfer cost. This is the core problem 3B-5-B/C exists to solve.
+- **Finding B** — Same-date `InventoryMovement` ordering is not yet established as a deterministic *business* ordering (only an incidental DB-scan order). Must be resolved before designing Historical Recalculation; do not default to `id` without a conscious decision.
+- **Finding C** — `_return_unit_cost().first()` is ambiguous when an original invoice has multiple lines for the same item. **Returns correctness, not a 3B-4 or Historical-Correction issue** — recommend tracking as an independent bug ticket (RETURNS-COST-001) so it doesn't get silently folded into or lost inside the larger 3B-5 design.
+- **Finding D** (new) — Stock transfers share Finding A's exact asymmetry (current-average pricing regardless of backdate). Recommend folding this into the same 3B-5-C design rather than treating transfers as a separate problem later.
 
----
-### A coach's note, not a compliance note
-You told the programmer "لا نصلح شيئاً لأننا نعتقد أنه خاطئ قبل أن نثبت أولاً" — and this reconnaissance vindicates that instinct: item 8 (the backdated-purchase gap) is exactly the kind of thing that's tempting to "just fix" and would have quietly changed historical numbers without anyone deciding it should. Two things worth pressure-testing before 3B-5-B starts writing pure functions:
+## Accounting invariants (confirmed, not assumed)
+- InventoryMovement is append-only; nothing mutates a posted row in place.
+- OUT movements are always valued at their own stored `unit_cost`, never a re-derived average.
+- Average cost is isolated per `(item, warehouse)`; `None` is display-aggregation only, never a costing input.
+- POSTED `JournalEntry`/invoice lines are never edited in place — cancel-and-recreate or additive-reversal only.
+- Linked returns reprice from the exact original movement (when the lookup isn't ambiguous per Finding C); unlinked returns use current average by explicit design.
 
-- You've scoped out background jobs and Alembic until proven necessary — reasonable — but you haven't yet named *who decides* "proven necessary" for 3B-5-E, or what number (movement count? recompute latency?) triggers it. Leaving that as a subjective future call is the same kind of ambiguity you explicitly rejected for rounding thresholds back at Phase 3B-1's fuzz gate. Consider fixing a number now, cheaply, even if it's provisional.
-- The moving-average method itself (see [Investopedia's overview](https://www.investopedia.com/terms/a/averagecostmethod.asp) for the standard treatment) is defined against chronological order of transactions — your system currently has no reliable definition of "chronological" for same-day entries (gap #1) and no guard against inserting one that's earlier than something already relied on (gap #3). 3B-5-C is the right place to fix this, but it's worth naming explicitly as *the* reason 3B-5-C exists, not just "historical corrections" in the abstract — that framing will help the programmer see why the guard has to be general, not another opening-inventory-shaped special case.
+## Open design decisions (for 3B-5-B/C/D, not decided here)
+1. What deterministic secondary ordering key resolves Finding B — `id`, a new independent sequence, or `(movement_date, document_type priority, document_id)`? Needs a business-semantics decision, not just a SQL fix.
+2. What does "historical correction" mean accounting-wise for Finding A/D — recompute-only, a correction journal entry, blocking the edit outright until a certain point, or a policy that varies by how far downstream the impact reaches?
+3. Should Finding D (transfers) be corrected by the same mechanism as Finding A, or does the "no accounting effect" nature of transfers justify a lighter-weight fix?
+4. Period Lock policy (3B-5-D) needs Open/Closed period and Correction-date definitions before implementation — not addressed here by design.
+5. Background-job trigger is now fixed as: P95 > 2.0s on a realistic on-disk-SQLite benchmark, OR ≥50,000 affected `InventoryMovement` rows in a single correction (a mandatory-benchmark trigger, not an automatic background-job verdict either way).
+
+## Proposed scope for 3B-5-B only
+Based on this reconnaissance, 3B-5-B's job is narrowly: extract the *already-correct* current algorithms (average cost accumulation, COGS unit-cost lookup) into pure functions that take a list of movements and return a result — no DB/session/SQLAlchemy awareness — **without changing their behavior**, so 3B-5-C can build historical-recalculation logic against a pure, testable core instead of against `item_queries.py`'s DB-coupled version. Findings B, C, and D are inputs to that design, not blockers to starting it, provided the pure functions are built to accept an explicit, pre-ordered movement list (leaving the ordering decision, Finding B, to the caller / to 3B-5-C).
+
+## Explicitly not done in this phase (per your prohibition list)
+No change to the average-cost algorithm, COGS, Returns, `_return_unit_cost()`; no migration, period lock, historical-correction engine, background job, Boundary changes, service-layer redesign, Repository/UoW/DDD/DI, or start of 3B-5-B/C. This report is Characterization + Documentation-confirmation + Permanent Tests only.

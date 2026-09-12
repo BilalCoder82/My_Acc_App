@@ -1,6 +1,6 @@
 {
-  "gate_passed": false,
-  "regression_suite_passed": null,
+  "gate_passed": true,
+  "regression_suite_passed": true,
   "num_scenarios": 200,
   "num_failed": 0,
   "rounding_tolerance_per_operation": "0.010",

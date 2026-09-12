@@ -210,6 +210,99 @@ check(
     f"files referencing the §39 rule/guard text: {grep_guard}",
 )
 
+# ---------------------------------------------------------------------------
+# 6) Warehouse isolation — Item X/Warehouse A activity must not leak into
+#    Item X/Warehouse B's average cost or balance.
+# ---------------------------------------------------------------------------
+from app.services.inventory_transfer import transfer_stock
+from app.models import Warehouse
+
+s6 = fresh_session()
+cash6, inv6, cogs6, sales6 = seed_accounts(s6)
+item6 = make_item(s6, inv6, cogs6, sales6)
+wh_a = get_default_warehouse(s6)
+wh_b = Warehouse(name_ar="مستودع ب")
+s6.add(wh_b)
+s6.commit()
+make_purchase(s6, item6, wh_a, 100, Decimal("10"), datetime.date(2026, 1, 1))
+make_purchase(s6, item6, wh_b, 100, Decimal("999"), datetime.date(2026, 1, 1))
+avg_a = get_item_stock_summary(s6, item6.id, warehouse_id=wh_a.id).average_cost
+avg_b = get_item_stock_summary(s6, item6.id, warehouse_id=wh_b.id).average_cost
+check(
+    "6. warehouse isolation: identical item, wildly different cost in each warehouse, no leakage either direction",
+    avg_a == Decimal("10") and avg_b == Decimal("999"),
+    f"warehouse A avg={avg_a}, warehouse B avg={avg_b}",
+)
+
+# ---------------------------------------------------------------------------
+# 7) Stock transfer prices the outgoing leg at the CURRENT average of the
+#    source warehouse at transfer time — not a historical/point-in-time
+#    average as of transfer_date if transfer_date is backdated. No
+#    JournalEntry is ever created for a transfer (confirmed by inspection:
+#    inventory_transfer.py never imports JournalEntry/post_immediate).
+# ---------------------------------------------------------------------------
+s7 = fresh_session()
+cash7, inv7, cogs7, sales7 = seed_accounts(s7)
+item7 = make_item(s7, inv7, cogs7, sales7)
+wh_src = get_default_warehouse(s7)
+wh_dst = Warehouse(name_ar="مستودع الوجهة")
+s7.add(wh_dst)
+s7.commit()
+make_purchase(s7, item7, wh_src, 100, Decimal("10"), datetime.date(2026, 1, 1))
+make_purchase(s7, item7, wh_src, 100, Decimal("20"), datetime.date(2026, 3, 1))  # avg now 15
+# Backdated transfer dated BEFORE the second purchase:
+transfer_stock(s7, item7.id, wh_src.id, wh_dst.id, 10, transfer_date=datetime.date(2026, 2, 1))
+transferred_movement = s7.query(InventoryMovement).filter_by(
+    warehouse_id=wh_dst.id, item_id=item7.id).first()
+check(
+    "7. backdated stock transfer prices the outgoing leg at TODAY's source-warehouse average "
+    "(15), not the average that actually existed on the backdated transfer_date (10) — "
+    "same asymmetry as Finding A, for an internal movement instead of a purchase",
+    transferred_movement.unit_cost == Decimal("15"),
+    f"transfer dated 2026-02-01 (when true avg was 10) was costed at {transferred_movement.unit_cost}",
+)
+
+# ---------------------------------------------------------------------------
+# 8) Returns Finding C — _return_unit_cost() uses .first() keyed only on
+#    (source_id, item_id). An original invoice with two lines for the same
+#    item makes the linked-return cost lookup pick whichever movement the
+#    DB returns first, not necessarily the line actually being returned.
+# ---------------------------------------------------------------------------
+from app.services.returns import _return_unit_cost
+from app.models import InvoiceLine as _IL
+
+s8 = fresh_session()
+cash8, inv8, cogs8, sales8 = seed_accounts(s8)
+item8 = make_item(s8, inv8, cogs8, sales8)
+wh8 = get_default_warehouse(s8)
+make_purchase(s8, item8, wh8, 100, Decimal("10"), datetime.date(2026, 1, 1))
+d_sale = datetime.date(2026, 2, 1)
+inv_two_lines = Invoice(invoice_no=_ref("SI"), kind=InvoiceKind.SALES, party_name="عميل",
+                         invoice_date=d_sale, currency_code="SYP", exchange_rate=Decimal("1"),
+                         status=InvoiceStatus.DRAFT, warehouse_id=wh8.id)
+# Same item, two separate lines, deliberately different quantities so the
+# resulting InventoryMovement rows are distinguishable if inspected directly:
+inv_two_lines.lines = [
+    _IL(item_id=item8.id, quantity=2, unit_price=Decimal("50")),
+    _IL(item_id=item8.id, quantity=5, unit_price=Decimal("50")),
+]
+s8.add(inv_two_lines)
+s8.commit()
+post_sales_invoice(s8, inv_two_lines)
+movements_for_invoice = s8.query(InventoryMovement).filter_by(
+    source_type="sales_invoice", source_id=inv_two_lines.id).all()
+looked_up_cost = _return_unit_cost(s8, item8.id, inv_two_lines, wh8.id)
+check(
+    "8. [Returns Finding C — separate from Historical Corrections] an invoice with two lines "
+    "for the same item produces two InventoryMovement rows for that (source_id, item_id) pair; "
+    "_return_unit_cost() .first()-selects one of them with no line-level disambiguation",
+    len(movements_for_invoice) == 2 and looked_up_cost == movements_for_invoice[0].unit_cost,
+    f"{len(movements_for_invoice)} movements exist for this (invoice, item) pair "
+    f"(qty {[float(m.quantity) for m in movements_for_invoice]}); "
+    f"_return_unit_cost() returned {looked_up_cost} — the FIRST one only, "
+    "regardless of which line the return is actually for",
+)
+
 print()
 print(f"Characterization summary: {sum(1 for r in results if r[0]=='PASS')}/{len(results)} PASS")
 failed = [r for r in results if r[0] == "FAIL"]
