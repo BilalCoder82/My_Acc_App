@@ -129,6 +129,29 @@ def _average_cost(session: Session, item_id: int, warehouse_id: int) -> Decimal:
     return get_item_stock_summary(session, item_id, warehouse_id=warehouse_id).average_cost
 
 
+def calculate_purchase_unit_cost(net_after_all_discounts: Decimal, exchange_rate: Decimal, quantity: Decimal) -> Decimal:
+    """PHASE 3B-5-B — استخراج نقي حرفي للحساب الذي كان inline داخل
+    post_purchase_invoice(). لا Session، لا I/O. المعادلة والتقريب
+    الوسيط (money() على net_in_base قبل القسمة) محفوظان بالضبط كما كانا
+    — هذا استخراج، وليس إعادة تصميم. الحماية من quantity == 0 محفوظة.
+
+    **غير مُمَسّ بهذا الاستخراج**: تكلفة الوحدة المخزَّنة بـInventoryMovement
+    يجب أن تبقى دائماً بالعملة الأساسية (WORKFLOW.md §23/§30) — هذا الحساب
+    مستقل تماماً عن AccountingIntent/سطر القيد المحاسبي لحساب المخزون."""
+    net_in_base = money(net_after_all_discounts * exchange_rate)
+    return (net_in_base / quantity) if quantity else Decimal("0")
+
+
+def calculate_cogs(unit_cost: Decimal, quantity: Decimal) -> Decimal:
+    """PHASE 3B-5-B — استخراج نقي حرفي للحساب الذي كان inline داخل
+    post_sales_invoice(). لا Session، لا I/O، ولا نقل لجلب unit_cost إلى
+    هنا — يبقى ذلك مسؤولية caller عبر _average_cost() كما كان تماماً.
+    ليست calculate_cogs_from_db() ولن تصبح كذلك — إن احتاج 3B-5-C مستقبلاً
+    مصدراً مختلفاً لـunit_cost، يبقى هذا التوقيع كما هو ويتغيّر الـcaller
+    فقط. تجميع COGS حسب account pair يبقى مسؤولية post_sales_invoice()."""
+    return money(unit_cost * quantity)
+
+
 def _line_intent(account_id: int, debit: Decimal, credit: Decimal, exchange_rate) -> LineIntent:
     """PHASE3B4/Group 3-A — نظير _jline() تماماً لكن يُرجِع LineIntent
     بدل JournalLine جاهز (لا نبني JournalLine مباشرة بعد الآن — يبنيه
@@ -208,7 +231,7 @@ def post_sales_invoice(session: Session, invoice: Invoice, is_cash: bool = True)
         sales_credits[sales_acc_id] = sales_credits.get(sales_acc_id, Decimal("0")) + line_total.net_after_all_discounts
 
         unit_cost = _average_cost(session, item.id, warehouse_id)
-        line_cogs = money(unit_cost * D(line_total.line.quantity))
+        line_cogs = calculate_cogs(unit_cost, D(line_total.line.quantity))
         cogs_debits[item.cogs_account_id] = cogs_debits.get(item.cogs_account_id, Decimal("0")) + line_cogs
         inventory_credits[item.inventory_account_id] = inventory_credits.get(item.inventory_account_id, Decimal("0")) + line_cogs
 
@@ -302,8 +325,11 @@ def post_purchase_invoice(session: Session, invoice: Invoice, is_cash: bool = Tr
         # القيد المحاسبي لحساب المخزون (ذاك يبقى بعملة الفاتورة الخام عبر
         # _line_intent تماماً كـCash/AP، لا علاقة له بـunit_cost هنا) — لا
         # تحويل مزدوج، ولا Boundary يحسب أو يعرف عن unit_cost إطلاقاً.
-        net_in_base = money(line_total.net_after_all_discounts * D(invoice.exchange_rate))
-        unit_cost_after_discount = (net_in_base / q) if q else Decimal("0")
+        # PHASE 3B-5-B: الحساب نفسه استُخرج إلى calculate_purchase_unit_cost()
+        # (نقي، بلا تغيير في المعادلة أو التقريب الوسيط).
+        unit_cost_after_discount = calculate_purchase_unit_cost(
+            line_total.net_after_all_discounts, D(invoice.exchange_rate), q,
+        )
         pending_movements.append(InventoryMovement(
             item_id=item.id, warehouse_id=warehouse_id, direction=MovementDirection.IN,
             quantity=line_total.line.quantity, unit_cost=unit_cost_after_discount,

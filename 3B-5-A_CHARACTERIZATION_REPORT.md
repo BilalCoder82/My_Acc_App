@@ -83,10 +83,28 @@ Exactly one exists in the whole codebase: `opening_balances.py::reverse_opening_
 (Test B — same-date ordering — is check #2 above; no independent tiebreaker exists to test beyond confirming its absence.)
 
 ## Findings (kept explicitly separate as requested)
-- **Finding A** — Historical late purchase/transfer does not currently retroactively recalculate already-posted downstream COGS or transfer cost. This is the core problem 3B-5-B/C exists to solve.
+- **Finding A** — A late historical purchase does not currently trigger retroactive recalculation of already-posted downstream COGS. This is the core problem 3B-5-B/C exists to solve.
 - **Finding B** — Same-date `InventoryMovement` ordering is not yet established as a deterministic *business* ordering (only an incidental DB-scan order). Must be resolved before designing Historical Recalculation; do not default to `id` without a conscious decision.
 - **Finding C** — `_return_unit_cost().first()` is ambiguous when an original invoice has multiple lines for the same item. **Returns correctness, not a 3B-4 or Historical-Correction issue** — recommend tracking as an independent bug ticket (RETURNS-COST-001) so it doesn't get silently folded into or lost inside the larger 3B-5 design.
-- **Finding D** (new) — Stock transfers share Finding A's exact asymmetry (current-average pricing regardless of backdate). Recommend folding this into the same 3B-5-C design rather than treating transfers as a separate problem later.
+- **Finding D** (new) — A backdated stock transfer is costed using the source warehouse's current average rather than the historical average applicable at the transfer date. Independent of Finding A, but the same conceptual category of historical-costing problem — recommend folding into the same 3B-5-C design discussion rather than treating transfers as a separate problem later.
+
+## Finding C scope clarification
+Finding C (RETURNS-COST-001) is intentionally excluded from PHASE 3B-5-B, 3B-5-C, and 3B-5-D.
+
+This finding concerns Returns correctness and line-level identification: `_return_unit_cost()` cannot unambiguously identify the originating inventory movement when an original invoice contains multiple lines for the same item. It is therefore tracked as an independent Returns bug and is not a Historical-Correction design problem.
+
+Accordingly:
+- 3B-5-B does not design or resolve Finding C.
+- 3B-5-C does not design or resolve Finding C.
+- 3B-5-D does not design or resolve Finding C.
+- No historical-recalculation architecture should be shaped around Finding C.
+- No production change is authorized for Finding C in the 3B-5 phases.
+- Finding C remains recorded for future dedicated Returns work.
+
+Only Findings A, B, and D belong to the current historical-costing design track:
+- **A** — Historical Purchase → downstream COGS.
+- **B** — Historical movement ordering (same-`movement_date` ties).
+- **D** — Historical Stock Transfer Costing.
 
 ## Accounting invariants (confirmed, not assumed)
 - InventoryMovement is append-only; nothing mutates a posted row in place.
@@ -95,15 +113,28 @@ Exactly one exists in the whole codebase: `opening_balances.py::reverse_opening_
 - POSTED `JournalEntry`/invoice lines are never edited in place — cancel-and-recreate or additive-reversal only.
 - Linked returns reprice from the exact original movement (when the lookup isn't ambiguous per Finding C); unlinked returns use current average by explicit design.
 
-## Open design decisions (for 3B-5-B/C/D, not decided here)
+## Open design decisions (for 3B-5-B/C/D; Finding C is explicitly excluded)
 1. What deterministic secondary ordering key resolves Finding B — `id`, a new independent sequence, or `(movement_date, document_type priority, document_id)`? Needs a business-semantics decision, not just a SQL fix.
 2. What does "historical correction" mean accounting-wise for Finding A/D — recompute-only, a correction journal entry, blocking the edit outright until a certain point, or a policy that varies by how far downstream the impact reaches?
 3. Should Finding D (transfers) be corrected by the same mechanism as Finding A, or does the "no accounting effect" nature of transfers justify a lighter-weight fix?
 4. Period Lock policy (3B-5-D) needs Open/Closed period and Correction-date definitions before implementation — not addressed here by design.
 5. Background-job trigger is now fixed as: P95 > 2.0s on a realistic on-disk-SQLite benchmark, OR ≥50,000 affected `InventoryMovement` rows in a single correction (a mandatory-benchmark trigger, not an automatic background-job verdict either way).
 
-## Proposed scope for 3B-5-B only
-Based on this reconnaissance, 3B-5-B's job is narrowly: extract the *already-correct* current algorithms (average cost accumulation, COGS unit-cost lookup) into pure functions that take a list of movements and return a result — no DB/session/SQLAlchemy awareness — **without changing their behavior**, so 3B-5-C can build historical-recalculation logic against a pure, testable core instead of against `item_queries.py`'s DB-coupled version. Findings B, C, and D are inputs to that design, not blockers to starting it, provided the pure functions are built to accept an explicit, pre-ordered movement list (leaving the ordering decision, Finding B, to the caller / to 3B-5-C).
+## Proposed scope for 3B-5-B
+The proposed scope for 3B-5-B is limited to identifying and isolating the currently existing inventory-cost calculations that can be expressed as pure functions, without changing their current behavior or resolving any of the open characterization findings.
+
+This includes identifying the calculation inputs, outputs, and existing invariants for calculations such as Average Cost, COGS, purchase cost, and other currently deterministic cost calculations where applicable.
+
+No conclusion is made here regarding:
+- ownership of inventory-movement ordering;
+- resolution of Finding B (same-date ordering);
+- resolution of Finding D (historical stock-transfer costing);
+- historical recalculation or correction strategy;
+- transaction/workflow ownership;
+- background processing;
+- period locking.
+
+Those remain open design questions to be addressed only after the characterization findings have been formally reviewed and the relevant design decisions are made.
 
 ## Explicitly not done in this phase (per your prohibition list)
 No change to the average-cost algorithm, COGS, Returns, `_return_unit_cost()`; no migration, period lock, historical-correction engine, background job, Boundary changes, service-layer redesign, Repository/UoW/DDD/DI, or start of 3B-5-B/C. This report is Characterization + Documentation-confirmation + Permanent Tests only.
