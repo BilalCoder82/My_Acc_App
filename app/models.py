@@ -511,6 +511,248 @@ class Setting(Base):
 
 
 # ---------------------------------------------------------------------------
+# PHASE 3B-5-C — Correction Event (schema only)
+# ---------------------------------------------------------------------------
+# هذا القسم Schema فقط — بلا أي منطق Detection/Analysis/Recalculation.
+# التصميم الدلالي الكامل والمبررات موثّقة في
+# 3B-5-C_DISCOVERY_DESIGN_QUESTIONS.md (Q1–Q3.6 + Pre-Implementation Schema
+# Audit). لا تُضف سلوكاً هنا لم يُقرَّر بعد في تلك الوثيقة.
+
+class CorrectionEventStatus(str, enum.Enum):
+    CANDIDATE = "candidate"
+    ANALYSIS = "analysis"
+    PENDING = "pending"
+    APPROVED = "approved"
+    ACCOUNTING_CORRECTION = "accounting_correction"
+    STALE = "stale"
+    WITHDRAWN = "withdrawn"
+
+
+class RootCauseComponentType(str, enum.Enum):
+    NEW_MOVEMENT = "new_movement"
+    REVERSAL = "reversal"
+    REPLACEMENT = "replacement"
+
+
+class ChronologyBasis(str, enum.Enum):
+    KNOWN = "known"
+    ASSUMED = "assumed"
+
+
+class ScopeCompleteness(str, enum.Enum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+
+
+class ImpactScopeElementKind(str, enum.Enum):
+    MOVEMENT = "movement"
+    DOCUMENT = "document"
+    ACCOUNTING_EFFECT = "accounting_effect"
+
+
+class ImpactScopeRelationshipType(str, enum.Enum):
+    CAUSES = "causes"
+    PRECEDES = "precedes"
+    PROPAGATES_TO = "propagates_to"
+    BELONGS_TO = "belongs_to"
+    PRODUCES_ACCOUNTING_EFFECT = "produces_accounting_effect"
+
+
+class CorrectionEvent(Base):
+    """الكيان الجذري. Item-scoped دائماً (راجع تدقيق Item Scope في الوثيقة).
+    status هو الحقل الوحيد القابل للتغيير طوال دورة الحياة؛ كل شيء آخر عن
+    الحدث نفسه (item، root causes) يثبت عند الإنشاء."""
+    __tablename__ = "correction_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), nullable=False, index=True)
+    trigger_type: Mapped[str] = mapped_column(String(30))
+    status: Mapped[CorrectionEventStatus] = mapped_column(
+        Enum(CorrectionEventStatus), default=CorrectionEventStatus.CANDIDATE, index=True
+    )
+    chronology_basis: Mapped[ChronologyBasis | None] = mapped_column(Enum(ChronologyBasis))
+    scope_completeness: Mapped[ScopeCompleteness | None] = mapped_column(Enum(ScopeCompleteness))
+    analysis_as_of: Mapped[datetime | None] = mapped_column(DateTime)
+    # لا FK حقيقي هنا عمداً (وليس سهواً): approved_candidate_state_id يشير إلى
+    # correction_event_candidate_states، التي بدورها تشير إلى هذا الجدول —
+    # علاقة دائرية حقيقية بين جدولين جديدين معاً. بدل الالتفاف بإنشاء الجداول
+    # على مرحلتين في migration (batch mode على SQLite يعيد بناء الجدول بالكامل
+    # لكل ALTER، مما يعقّد الترتيب الدائري بلا داعٍ)، عولجت بنفس أسلوب
+    # source_type/source_id المرجعي القائم فعلاً في المشروع: عمود عادي بلا قيد
+    # FK على مستوى القاعدة، إنفاذ الإشارة يبقى مسؤولية طبقة الخدمة لاحقاً.
+    # يبقى NULL طوال CANDIDATE/ANALYSIS/PENDING/STALE — لا مرشّح "مفضَّل" حتى
+    # لحظة الموافقة الصريحة فقط.
+    approved_candidate_state_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    item: Mapped["Item"] = relationship(foreign_keys=[item_id], viewonly=True)
+    root_causes: Mapped[list["CorrectionEventRootCause"]] = relationship(back_populates="correction_event")
+    tie_groups: Mapped[list["CorrectionEventTieGroup"]] = relationship(back_populates="correction_event")
+    candidate_states: Mapped[list["CorrectionEventCandidateState"]] = relationship(
+        back_populates="correction_event", foreign_keys="CorrectionEventCandidateState.correction_event_id"
+    )
+    impact_scope_elements: Mapped[list["CorrectionEventImpactScopeElement"]] = relationship(back_populates="correction_event")
+    accounting_corrections: Mapped[list["CorrectionEventAccountingCorrection"]] = relationship(back_populates="correction_event")
+
+
+class CorrectionEventRootCause(Base):
+    """Root Cause = حركة جديدة واحدة، أو (reversal + replacement) مرتبطان —
+    لا يُفترَض أبداً أن الجذر InventoryMovement واحد (راجع Q3.1)."""
+    __tablename__ = "correction_event_root_causes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    component_type: Mapped[RootCauseComponentType] = mapped_column(Enum(RootCauseComponentType))
+    # نفس نمط source_type/source_id الموجود فعلاً في InventoryMovement/JournalEntry
+    # — لا FK حقيقي، لأن المرجع قد يكون حركة أو مستنداً (شراء/عكس/فاتورة بديلة).
+    source_type: Mapped[str] = mapped_column(String(30), index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, index=True)
+
+    correction_event: Mapped["CorrectionEvent"] = relationship(back_populates="root_causes")
+
+
+class CorrectionEventTieGroup(Base):
+    """مجموعة حركات بنفس movement_date لا يحسم ترتيبها الاقتصادي الفعلي —
+    راجع Q2.5. صفر مجموعات يعني تسلسلاً زمنياً معروفاً بالكامل لهذا الحدث."""
+    __tablename__ = "correction_event_tie_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    tied_movement_date: Mapped[date] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+
+    correction_event: Mapped["CorrectionEvent"] = relationship(back_populates="tie_groups")
+    ordering_assumptions: Mapped[list["CorrectionEventOrderingAssumption"]] = relationship(back_populates="tie_group")
+
+
+class CorrectionEventOrderingAssumption(Base):
+    """حل مفترَض واحد محدَّد لترتيب TieGroup — التمثيل المُختزَل (run-collapsed
+    interleaving) من Q2.5، لا permutation خام. Assumed Costing Order صراحة،
+    لا Historical Fact مكتشف."""
+    __tablename__ = "correction_event_ordering_assumptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tie_group_id: Mapped[int] = mapped_column(ForeignKey("correction_event_tie_groups.id"), nullable=False, index=True)
+    ordering_representation: Mapped[str] = mapped_column(Text)
+
+    tie_group: Mapped["CorrectionEventTieGroup"] = relationship(back_populates="ordering_assumptions")
+
+
+class CorrectionEventCandidateState(Base):
+    """نتيجة تحليلية واحدة — ليست بالضرورة ناتجة عن غموض (1..N دائماً، راجع
+    تصحيح الـcardinality في Q3.6). Delta-primary، Baseline بالإشارة لا بالنسخ
+    (Q3.3.1)."""
+    __tablename__ = "correction_event_candidate_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    label: Mapped[str | None] = mapped_column(String(10))  # "A"/"B"... للعرض فقط، ليست هوية
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    correction_event: Mapped["CorrectionEvent"] = relationship(
+        back_populates="candidate_states", foreign_keys=[correction_event_id]
+    )
+    ordering_links: Mapped[list["CorrectionEventCandidateOrderingLink"]] = relationship(back_populates="candidate_state")
+    delta_records: Mapped[list["CorrectionEventDeltaRecord"]] = relationship(back_populates="candidate_state")
+
+
+class CorrectionEventCandidateOrderingLink(Base):
+    """يربط Candidate بمجموعة الافتراضات (واحد لكل TieGroup) التي أنتجته معاً
+    — يجب أن يمثل كل Candidate حلاً متسقاً عالمياً (Q3.3.7)، لا اختياراً محلياً.
+    tie_group_id مُكرَّر عمداً لتمكين القيد أدناه: لا يجوز لنفس الـCandidate أن
+    يحمل افتراضين متناقضين لنفس مجموعة التعادل — يُرفَض على مستوى DB، لا
+    Python فقط."""
+    __tablename__ = "correction_event_candidate_ordering_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_state_id", "tie_group_id",
+            name="uq_candidate_one_assumption_per_tiegroup",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_state_id: Mapped[int] = mapped_column(
+        ForeignKey("correction_event_candidate_states.id"), nullable=False, index=True
+    )
+    ordering_assumption_id: Mapped[int] = mapped_column(
+        ForeignKey("correction_event_ordering_assumptions.id"), nullable=False
+    )
+    tie_group_id: Mapped[int] = mapped_column(ForeignKey("correction_event_tie_groups.id"), nullable=False)
+
+    candidate_state: Mapped["CorrectionEventCandidateState"] = relationship(back_populates="ordering_links")
+
+
+class CorrectionEventDeltaRecord(Base):
+    """المتغيران البدائيان فقط (Q3.3.4) — quantity وvalue؛ average_cost وما
+    يُشتَق منهما (movement_unit_cost، cogs_consequence) محسوبان عند الطلب،
+    غير مخزَّنين هنا. delta_quantity قد تكون NULL على مستوى الحركة الفردية إذا
+    مُثِّلت على مستوى regime-segment بدلاً من ذلك (راجع الملاحظة في Q3.3.4 عن
+    ثبات ΔQuantity داخل نطاق المستودع)."""
+    __tablename__ = "correction_event_delta_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_state_id: Mapped[int] = mapped_column(
+        ForeignKey("correction_event_candidate_states.id"), nullable=False, index=True
+    )
+    movement_id: Mapped[int] = mapped_column(ForeignKey("inventory_movements.id"), nullable=False)
+    delta_quantity: Mapped[object | None] = mapped_column(Numeric(14, 3))
+    delta_inventory_value: Mapped[object] = mapped_column(Numeric(14, 4))
+
+    candidate_state: Mapped["CorrectionEventCandidateState"] = relationship(back_populates="delta_records")
+
+
+class CorrectionEventImpactScopeElement(Base):
+    """عقدة واحدة في رسم Q2.6 — حركة، مستند، أو أثر محاسبي. UNIQUE يمنع تكرار
+    نفس العنصر داخل نطاق نفس الحدث."""
+    __tablename__ = "correction_event_impact_scope_elements"
+    __table_args__ = (
+        UniqueConstraint(
+            "correction_event_id", "source_type", "source_id",
+            name="uq_scope_element_no_duplicate",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    kind: Mapped[ImpactScopeElementKind] = mapped_column(Enum(ImpactScopeElementKind))
+    source_type: Mapped[str] = mapped_column(String(30), index=True)
+    source_id: Mapped[int] = mapped_column(Integer, index=True)
+
+    correction_event: Mapped["CorrectionEvent"] = relationship(back_populates="impact_scope_elements")
+
+
+class CorrectionEventImpactScopeRelationship(Base):
+    """حافة واحدة في رسم Q2.6 — قد تعبر مستودعات، وقد تُشكِّل دورة (W1→W2→W1،
+    مثبتة في Q2.4) — عقد الرسم حركات فعلية منتهية العدد دائماً، فلا مشكلة
+    إنهاء، فقط مشكلة حجم (Q2.7)."""
+    __tablename__ = "correction_event_impact_scope_relationships"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    from_element_id: Mapped[int] = mapped_column(
+        ForeignKey("correction_event_impact_scope_elements.id"), nullable=False
+    )
+    to_element_id: Mapped[int] = mapped_column(
+        ForeignKey("correction_event_impact_scope_elements.id"), nullable=False
+    )
+    relationship_type: Mapped[ImpactScopeRelationshipType] = mapped_column(Enum(ImpactScopeRelationshipType))
+
+
+class CorrectionEventAccountingCorrection(Base):
+    """مرجع خفيف فقط إلى JournalEntry الحقيقي المُنشأ عبر post_immediate() —
+    ليس دفتراً محاسبياً موازياً. نفس نمط Settlement.journal_entry_id /
+    OpeningBalance الموجود فعلاً في المشروع (unique=True: قيد واحد لكل
+    تصحيح)."""
+    __tablename__ = "correction_event_accounting_corrections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_event_id: Mapped[int] = mapped_column(ForeignKey("correction_events.id"), nullable=False, index=True)
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entries.id"), unique=True)
+
+    correction_event: Mapped["CorrectionEvent"] = relationship(back_populates="accounting_corrections")
+
+
+# ---------------------------------------------------------------------------
 # محرك إنشاء قاعدة بيانات جديدة لعميل
 # ---------------------------------------------------------------------------
 
