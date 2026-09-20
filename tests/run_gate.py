@@ -66,6 +66,9 @@ REGRESSION_FILES = [
     "tests/test_invoice_cancel_boundary_migration.py",
     "tests/test_jv_open_opnpty_namespace_seed.py",
     "tests/test_reverse_manual_entry_wrapper.py",
+    "tests/test_correction_detection_3b5e.py",
+    "tests/test_correction_scope_3b5f.py",
+    "tests/test_movement_date_type_defect_characterization.py",
 ]
 
 # لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة

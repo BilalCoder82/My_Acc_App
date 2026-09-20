@@ -17,6 +17,12 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Session
 
 from app.migrations.alembic_runner import ensure_schema_up_to_date
+from app.services.correction_detection import attach_detection_listeners
+
+# PHASE3B5E: يُثبَّت مرة واحدة عند تحميل هذه الوحدة — على مستوى صنف Session
+# الأساسي، لا لكل استدعاء open_company_db()/get_registry_session() (راجع
+# app/services/correction_detection.py للتفاصيل الكاملة).
+attach_detection_listeners()
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 REGISTRY_PATH = os.path.join(DATA_DIR, "registry.db")

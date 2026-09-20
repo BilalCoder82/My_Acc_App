@@ -12,14 +12,14 @@ Multi-tenant Accounting System — Core Schema
 from __future__ import annotations
 
 import enum
-from datetime import datetime, date
+from datetime import datetime, date, time
 
 from sqlalchemy import (
     create_engine, ForeignKey, String, Numeric, Date, DateTime,
-    Boolean, Enum, Text, CheckConstraint, UniqueConstraint, Integer
+    Boolean, Enum, Text, CheckConstraint, UniqueConstraint, Integer, Index
 )
 from sqlalchemy.orm import (
-    DeclarativeBase, Mapped, mapped_column, relationship, Session
+    DeclarativeBase, Mapped, mapped_column, relationship, Session, validates
 )
 
 
@@ -164,6 +164,11 @@ class Warehouse(Base):
 class InventoryMovement(Base):
     """كل حركة مخزون (دخول/خروج) مرتبطة بمصدرها — فاتورة أو تسوية يدوية."""
     __tablename__ = "inventory_movements"
+    __table_args__ = (
+        # PHASE3B5E: يدعم استعلام الـDetection — راجع
+        # 7b3e9d1f4c6a_add_correction_detection_index.py لتبرير ترتيب الأعمدة.
+        Index("ix_inventory_movements_item_wh_date", "item_id", "warehouse_id", "movement_date"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
@@ -177,6 +182,29 @@ class InventoryMovement(Base):
     note: Mapped[str | None] = mapped_column(Text)
 
     item: Mapped["Item"] = relationship(back_populates="movements")
+
+    # PHASE3B5E-DEFECT-FIX: عقد العمود المُعلَن هنا هو datetime (السطر
+    # أعلاه). كل التسعة مواقع الإنشاء الحالية (posting.py×2, returns.py×2,
+    # invoice_cancel.py×1, opening_balances.py×2, inventory_transfer.py×2)
+    # تُمرِّر date مجرَّداً فعلياً (Invoice.invoice_date/StockTransfer.
+    # transfer_date/معاملات cancel_date وopening_date وreversal_date —
+    # كلها date). القيمة المخزَّنة بالقاعدة كانت صحيحة دائماً (تحويل
+    # الكتابة يعمل)، لكن الكائن بالذاكرة (قبل أي round-trip من القاعدة)
+    # كان يبقى date مجرَّداً — سبَّب مطابقة نصية خاطئة بمقارنات
+    # correction_detection.py بين حركتين بنفس التاريخ التقويمي تماماً
+    # (SQLite يقارن '...00:00:00.000000' > '...' نصياً، فتُعتبَر السلسلة
+    # الأطول "أكبر" رغم تطابق التاريخ). هذا المُحقِّق يفرض العقد المُعلَن
+    # فعلياً عند أي إسناد، بصرف النظر عن المصدر — كائن datetime حقيقي عبر
+    # datetime.combine()، لا تنسيق نصّي يدوي (isoformat() فشل بتجربة
+    # سابقة لنفس السبب بالضبط: عدد أصفار عشرية مختلف). لا تغيير schema/
+    # migration — سلوك Python وقت الإسناد فقط.
+    @validates("movement_date")
+    def _normalize_movement_date(self, key, value):
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+        return value
 
 
 # ---------------------------------------------------------------------------
