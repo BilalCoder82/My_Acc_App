@@ -4,20 +4,35 @@ PHASE 3B-5-F — Impact Scope Construction
 يبني الرسم البياني (graph) لنطاق تأثير CorrectionEvent موجود مسبقاً
 (بحالة CANDIDATE من 3B-5-E) — أين يمتد الأثر، لا ما هي القيمة المالية
 المصحَّحة. يطبِّق حصراً القرارات المغلقة بـ3B-5-F_DESIGN_CLOSED_INDEX.md
-(FD-001 إلى FD-006) وقراري ID-001/ID-002 الإضافيين (Implementation
-Design Decisions، لا FD جديدة).
+(FD-001 REV1 إلى FD-006) وقراري ID-001/ID-002/ID-003 الإضافيين
+(Implementation Design Decisions، لا FD جديدة).
+
+FD-001 REV1 — Data-Exhaustion Termination (لا Inventory-State):
+--------------------------------------------------------------------
+القرار الأصلي (`total_qty<=0` كإغلاق) أُعيد فتحه وأُلغِيَ كلياً — مُثبَت
+جبرياً (راجع `3B-5-F_FD001_REOPENED_DISCOVERY.md`) أن التصفير المتزامن
+بين حالة حقيقية وحالة افتراضية **مستحيل بنيوياً** حين تحمل حركة الجذر
+كمية غير صفرية (Case B — النمط التشغيلي الفعلي الوحيد الذي تُنتجه E
+حالياً، بما أنها تكتشف عبر INSERT فقط). حتى الحالة التي أُثبِتت آمنة
+نظرياً (Case A، هبوط دقيق للصفر) غير قابلة للاستخدام هنا: لا وسيلة
+موثوقة وقت التشغيل لمعرفة أن حدثاً معيَّناً هو Case A فعلاً، والعبور
+السالب غير آمن حتى ضمنها (يُخفي الفرق، لا يُلغيه).
+
+**البديل المُعتمَد**: `Traversal termination is data-exhaustion-based,
+not inventory-state-based`. لا `total_qty` بأي صياغة (`<=0`,`==0`,`<0`)
+تُستخدَم كإغلاق. كل فرع (item, warehouse) يُجتاز **حتى نهاية البيانات
+الحقيقية المعروفة** فقط — لا توقف مبكر بسبب أي حالة كمية. الاتجاه
+الآمن المُعتمَد: الإفراط بالشمول (over-inclusion) مقبول، النقصان
+(under-inclusion) غير مقبول — F يبني نطاقاً يُستهلَك لاحقاً بـG، لا
+نتيجة حساب نهائية.
 
 حد NO RECALCULATION (مطلق، من ميثاق F الأصلي) — يُطبَّق هنا حرفياً:
 --------------------------------------------------------------------
 هذه الوحدة لا تستدعي accumulate_average_cost() ولا get_item_stock_summary()
-إطلاقاً، ولا تقرأ أو تحسب unit_cost/average_cost بأي مكان. كل ما تحتاجه
-لقرار الإغلاق (FD-001) هو رصيد كمي بحت (quantity فقط، بإشارة من
-direction) — مسار مستقل كلياً عن مسار حساب التكلفة، عمداً (راجع مراجعة
-Implementation Specification §3.2: لا مصدر بديل موجود بالكود لرصيد كمي
-مستقل، فأُنشئ استعلام SUM جديد هنا خصيصاً لهذا الغرض، بلا أي لمس لـ
-unit_cost). التصحيح المالي الفعلي (FD-004: historical prefix، استبعاد
-target OUT، إلخ) يبقى معرفة تصميمية مغلقة لمرحلة لاحقة منفصلة — لا يُنفَّذ
-هنا.
+إطلاقاً، ولا تقرأ أو تحسب unit_cost/average_cost بأي مكان — ولم تعد
+تحتاج أي رصيد كمي أصلاً بعد إلغاء الإغلاق الكمي (FD-001 REV1). التصحيح
+المالي الفعلي يبقى معرفة تصميمية مغلقة لمرحلة G لاحقة منفصلة — لا
+يُنفَّذ هنا.
 
 ID-001 — Root Movement Membership:
 -----------------------------------
@@ -27,12 +42,11 @@ ID-001 — Root Movement Membership:
 
 ID-002 — Same-Date Atomic Group:
 ----------------------------------
-كل الحركات المتعادلة بـmovement_date تُعامَل كمجموعة ذرية واحدة عند
-تقييم total_qty<=0 — المجموعة كاملة تدخل النطاق أو لا تدخل، بلا أي ترتيب
-داخلي مُخترَع (id/insertion order/database row order). إن ظهرت مجموعة
-بأكثر من حركة واحدة ضمن الفرع المُجتاز فعلياً لحدث معيَّن، يُصبح
-chronology_basis=ASSUMED لذلك الحدث (KNOWN غير ذلك) — بلا أي علاقة
-تلقائية مع scope_completeness (FD-005).
+كل الحركات المتعادلة بـmovement_date تُعامَل كمجموعة ذرية واحدة —
+تُسجَّل معاً، بلا أي ترتيب داخلي مُخترَع (id/insertion order/database
+row order). إن ظهرت مجموعة بأكثر من حركة واحدة ضمن الفرع المُجتاز
+فعلياً لحدث معيَّن، يُصبح chronology_basis=ASSUMED لذلك الحدث (KNOWN
+غير ذلك) — بلا أي علاقة تلقائية مع scope_completeness (FD-005).
 
 ID-003 — Inter-Date Propagation Edge Semantics (مغلَق):
 --------------------------------------------------------
@@ -43,19 +57,34 @@ N×1 (fan-in). في حالة N×M (كلا الطرفين أكثر من عنصر)
 وغياب الحافة بينهما لا يجعل scope_completeness=PARTIAL. لا اختيار
 representative اصطناعي، لا آلية selective propagation جديدة.
 
-نقطة تشغيلية غير محسومة أيضاً، خارج نطاق هذه الوحدة عمداً:
+FD-005 (مُعدَّلة تبعياً بـFD-001 REV1، لا إعادة فتح لجوهرها):
+----------------------------------------------------------------
+`COMPLETE` = وصل الـtraversal لنهاية كل البيانات الحقيقية المعروفة لكل
+فرع مفتوح. بما أنه لا يوجد الآن أي إغلاق مبكر كمي، **كل traversal
+مكتمل البيانات ينتهي COMPLETE** — لا حالة `PARTIAL` ناتجة عن الـ
+traversal الكمي إطلاقاً بهذا التصميم. لو ظهر مستقبلاً سبب مشروع لعدم
+إكمال الـtraversal (حد أداء مُعتمَد لاحقاً مثلاً)، يُستخدَم `PARTIAL`
+وفق تصميم مستقل يُثبَت وقته — لا افتراض مُسبَق بطبيعته الآن.
+
+نقطة تشغيلية غير محسومة، خارج نطاق هذه الوحدة عمداً:
 -------------------------------------------------------------
 متى/من يستدعي build_impact_scope() فعلياً لحدث CANDIDATE جديد أنشأته
 correction_detection.py؟ هذه الوحدة **لا** تُستدعى تلقائياً من أي hook —
-لا وصل مباشر بـcorrection_detection.py. ربطها بأي مشغِّل (تلقائي بعد
-after_flush، دوري، يدوي) قرار سياسة (policy) صريح خارج ميثاق F الأصلي
-("NO POLICY DECISIONS: background jobs") — لم يُتَّخذ هنا، ويجب أن يُتَّخذ
-بوعي كمرحلة منفصلة.
+لا وصل مباشر بـcorrection_detection.py. ربطها بأي مشغِّل قرار سياسة
+صريح خارج ميثاق F الأصلي ("NO POLICY DECISIONS: background jobs") —
+لم يُتَّخذ هنا.
+
+قيد أداء معروف، غير مُعالَج بهذا التصميم عمداً (راجع FD-001 REV1 §7):
+-------------------------------------------------------------------------
+بإلغاء الإغلاق الكمي، طول أي سلسلة traversal أصبح محكوماً فقط بطول
+البيانات الحقيقية المعروفة — بلا حد أقصى مفروض هنا. أي حد أداء مستقبلي
+قرار منفصل يحتاج Correctness Proof خاصاً به (هل يُعيد إدخال نفس خطأ
+"التوقف المبكر غير المُثبَت" بصورة جديدة؟) — لا يُفتَرض آمناً بمجرد
+تصنيفه أداءً.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -70,35 +99,9 @@ from app.models import (
 
 
 # ---------------------------------------------------------------------------
-# 1. مسار الكمية المستقل (لا علاقة له بـaccumulate_average_cost())
+# 1. استرجاع الحركات اللاحقة (لا حساب كمي أو مالي بهذه الوحدة إطلاقاً —
+#    FD-001 REV1 ألغى الحاجة لأي رصيد كمي؛ راجع الـdocstring أعلاه)
 # ---------------------------------------------------------------------------
-
-def _cumulative_signed_quantity(movements: list[InventoryMovement]) -> Decimal:
-    """جمع إشاري بحت: IN موجب، غير ذلك سالب. دالة نقية، بلا Session، بلا
-    أي لمس لـunit_cost — مقصودة لتبقى مستقلة تماماً عن مسار حساب التكلفة
-    (§3.2 من Implementation Specification)."""
-    total = Decimal("0")
-    for m in movements:
-        if m.direction == MovementDirection.IN:
-            total += m.quantity
-        else:
-            total -= m.quantity
-    return total
-
-
-def _quantity_before(session: Session, item_id: int, warehouse_id: int, before_date) -> Decimal:
-    """الرصيد الكمي الحقيقي المطلق لـ(item, warehouse) قبل تاريخ معيّن
-    (حصراً، <) — لا عداداً نسبياً يبدأ من جذر التصحيح (مرفوض صراحة بـ
-    FD-001 كبديل)."""
-    movements = session.execute(
-        select(InventoryMovement).where(
-            InventoryMovement.item_id == item_id,
-            InventoryMovement.warehouse_id == warehouse_id,
-            InventoryMovement.movement_date < before_date,
-        )
-    ).scalars().all()
-    return _cumulative_signed_quantity(movements)
-
 
 def _fetch_subsequent_movements(session: Session, item_id: int, warehouse_id: int, from_date):
     """كل حركات (item, warehouse) بتاريخ >= from_date. الـORDER BY هنا
@@ -198,12 +201,13 @@ def record_scope_relationship(session: Session, correction_event_id: int,
 class _TraversalState:
     """حالة مشتركة عبر كل فروع/مستودعات حدث تصحيح واحد. visited_movement_ids
     وvisited_edges يضمنان عدم التكرار/termination فقط — لا علاقة لهما
-    بدلالة Scope نفسها (محكومة حصراً بـFD-001/002 وID-001/002)."""
+    بدلالة Scope نفسها (محكومة حصراً بـID-001/002/003 وFD-001 REV1).
+    لا عداد فروع مغلقة/مفتوحة بعد الآن (FD-001 REV1) — كل فرع يُجتاز
+    حتى نهاية بياناته بلا استثناء؛ scope_completeness=COMPLETE دائماً
+    بهذا التصميم (راجع finalize_scope_metadata)."""
     visited_movement_ids: set = field(default_factory=set)
     visited_edges: set = field(default_factory=set)
     chronology_ambiguous: bool = False
-    opened_branches: int = 0
-    closed_branches: int = 0
 
 
 def _link_groups(session, correction_event_id, from_elements, to_elements, state: _TraversalState) -> None:
@@ -235,11 +239,10 @@ def walk_warehouse_branch(session: Session, correction_event_id: int, item_id: i
                            predecessor_elements: list) -> None:
     """يبني Scope لفرع (item, warehouse) بدءاً من start_date (شاملة).
     يُسجِّل كل عنصر مكتشف، يعبر أي ساق OUT تحويل يواجهها (عبر
-    find_transfer_destination)، ويتوقف عند أول مجموعة تاريخ يهبط بعدها
-    total_qty إلى <=0 (FD-001) — مُقيَّمة كمجموعة ذرية واحدة لكل تاريخ
-    (ID-002)، بلا أي ترتيب داخلي مُفتَرَض."""
-    state.opened_branches += 1
-    total_qty = _quantity_before(session, item_id, warehouse_id, start_date)
+    find_transfer_destination)، ويستمر **حتى نفاد البيانات الحقيقية
+    المعروفة فقط** — بلا أي إيقاف مبكر قائم على حالة كمية (FD-001 REV1:
+    Data-exhaustion termination, not inventory-state termination).
+    المجموعات الذرية (ID-002) تُسجَّل معاً، بلا ترتيب داخلي مُفتَرَض."""
     movements = _fetch_subsequent_movements(session, item_id, warehouse_id, start_date)
 
     groups: dict = {}
@@ -255,7 +258,7 @@ def walk_warehouse_branch(session: Session, correction_event_id: int, item_id: i
         for m in group:
             if m.id in state.visited_movement_ids:
                 # مُسجَّلة مسبقاً (مثلاً: الجذر نفسه ضمن مجموعته الخاصة) —
-                # لا إعادة تسجيل، لكن تبقى ضمن حساب total_qty للمجموعة.
+                # لا إعادة تسجيل.
                 continue
             state.visited_movement_ids.add(m.id)
             element = record_scope_element(
@@ -267,8 +270,6 @@ def walk_warehouse_branch(session: Session, correction_event_id: int, item_id: i
         if group_elements:
             _link_groups(session, correction_event_id, predecessor_elements,
                          [el for _, el in group_elements], state)
-
-        total_qty += _cumulative_signed_quantity(group)
 
         # عبور أي ساق OUT تحويل ضمن هذه المجموعة (FD-002)
         for m, element in group_elements:
@@ -286,15 +287,11 @@ def walk_warehouse_branch(session: Session, correction_event_id: int, item_id: i
                         destination.movement_date, state, predecessor_elements=[dest_element],
                     )
 
-        if total_qty <= 0:
-            state.closed_branches += 1
-            return  # الفرع أُغلِق بعد هذه المجموعة تحديداً (FD-001)
-
         if group_elements:
             predecessor_elements = [el for _, el in group_elements]
 
-    # انتهت البيانات المعروفة بلا عبور صفر — الفرع "مفتوح" (غير مغلق)،
-    # لا يُحتسَب ضمن closed_branches (يؤثر على scope_completeness لاحقاً).
+    # انتهت البيانات المعروفة -- الفرع اكتمل بالكامل (FD-001 REV1: لا
+    # إيقاف مبكر، فالوصول لهذه النقطة يعني استنفاد البيانات فعلياً).
 
 
 # ---------------------------------------------------------------------------
@@ -303,16 +300,16 @@ def walk_warehouse_branch(session: Session, correction_event_id: int, item_id: i
 
 def finalize_scope_metadata(session: Session, correction_event_id: int, state: _TraversalState) -> None:
     """يكتب scope_completeness وchronology_basis بعد انتهاء كل الفروع —
-    محوران مستقلان تماماً، لا اشتقاق أحدهما من الآخر."""
+    محوران مستقلان تماماً، لا اشتقاق أحدهما من الآخر. FD-001 REV1: بما
+    أن كل فرع يُجتاز حتى نفاد بياناته الحقيقية فعلياً (لا إيقاف مبكر
+    كمي)، scope_completeness=COMPLETE دائماً بهذا التصميم — لا حالة
+    PARTIAL ناتجة عن الـtraversal الكمي؛ PARTIAL محجوزة لسبب خارجي
+    مستقبلي (حد أداء مُعتمَد لاحقاً مثلاً)، غير مُطبَّقة هنا."""
     event = session.get(CorrectionEvent, correction_event_id)
     event.chronology_basis = (
         ChronologyBasis.ASSUMED if state.chronology_ambiguous else ChronologyBasis.KNOWN
     )
-    event.scope_completeness = (
-        ScopeCompleteness.COMPLETE
-        if state.closed_branches == state.opened_branches
-        else ScopeCompleteness.PARTIAL
-    )
+    event.scope_completeness = ScopeCompleteness.COMPLETE
     session.flush()
 
 

@@ -139,14 +139,19 @@ later_mvt = s.execute(select(InventoryMovement).where(
 check("1.2 Scope — استنفاد جزئي (30->5) لا يغلق الفرع",
       ("inventory_movement", later_mvt.id) in elements)
 
-# --- 1.3 exact zero crossing closes the branch ------------------------------
+# --- 1.3 (FD-001 REV1) exact zero crossing does NOT exclude later data ----
+# القاعدة القديمة (إغلاق عند total_qty<=0) أُلغِيَت (FD-001 REV1) --
+# التوقع الآن معكوس تماماً: الحركة اللاحقة بعد عبور الصفر يجب أن تدخل
+# النطاق، لا أن تُستبعَد. هذا تصحيح لتوقع خاطئ أثبته تقرير FD-001
+# Reopened Discovery رياضياً (Case B: استحالة التصفير المتزامن)، لا
+# تعديل لإنجاح الاختبار.
 s = fresh_session()
 coa, wh = seed(s)
 item = make_item(s, coa, "SC-ZERO")
 purchase(s, item, wh, 28, 10, DAY1, "SC-ZERO-P1")
 sale(s, item, wh, 30, 15, DAY5, "SC-ZERO-S1")        # يستنفد تماماً -- qty=0 (2+28-30=0)
-purchase(s, item, wh, 10, 20, DAY10, "SC-ZERO-AFTER")  # بعد الاستنفاد -- غير متأثرة
-purchase(s, item, wh, 2, 11, datetime.date(2025, 12, 20), "SC-ZERO-ROOT")  # +2 يُحسَب ضمن التراكم
+purchase(s, item, wh, 10, 20, DAY10, "SC-ZERO-AFTER")  # بعد العبور -- يجب أن تدخل النطاق الآن
+purchase(s, item, wh, 2, 11, datetime.date(2025, 12, 20), "SC-ZERO-ROOT")  # جذر بكمية غير صفرية (Case B)
 ev = only_candidate_event(s, item.id)
 build_impact_scope(s, ev.id)
 elements = scope_element_ids(s, ev.id)
@@ -158,35 +163,44 @@ zero_sale = s.execute(select(InventoryMovement).where(
     InventoryMovement.source_type == "sales_invoice", InventoryMovement.source_id == zero_inv.id)).scalars().first()
 check("1.3 Scope — عبور فعلي للصفر يُدرِج حركة الاستنفاد نفسها",
       ("inventory_movement", zero_sale.id) in elements)
-check("1.3b Scope — ولا يمتد لما بعد نقطة الاستنفاد",
-      ("inventory_movement", after_mvt.id) not in elements)
+check("1.3b Scope (FD-001 REV1) — ويمتد أيضاً لما بعد نقطة الاستنفاد (لا إيقاف مبكر كمي)",
+      ("inventory_movement", after_mvt.id) in elements)
 
-# --- 1.4 negative cumulative quantity closes -------------------------------
+# --- 1.4 (FD-001 REV1) REAL negative crossing does NOT exclude later data -
+# تصحيح مراجعة: النسخة السابقة من 1.4 كانت 1+9-10=0 (exact-zero، مكرِّرة
+# فعلياً 1.3/1.3b) لا عبوراً سالباً حقيقياً. هذه النسخة تصنع سالباً فعلياً:
+# 1 (root) + 5 (P1) - 10 (S1) = -4 قبل وصول AFTER.
 s = fresh_session()
 coa, wh = seed(s)
 item = make_item(s, coa, "SC-NEG")
-purchase(s, item, wh, 9, 10, DAY1, "SC-NEG-P1")
-sale(s, item, wh, 10, 15, DAY5, "SC-NEG-S1")         # qty=0 هنا فعلياً (1+9-10=0)
+purchase(s, item, wh, 5, 10, DAY1, "SC-NEG-P1")
+sale(s, item, wh, 10, 15, DAY5, "SC-NEG-S1")          # عبور سالب فعلي: 1+5-10=-4
 purchase(s, item, wh, 20, 12, DAY10, "SC-NEG-AFTER")
 purchase(s, item, wh, 1, 11, datetime.date(2025, 12, 25), "SC-NEG-ROOT")
 ev = only_candidate_event(s, item.id)
 build_impact_scope(s, ev.id)
 elements = scope_element_ids(s, ev.id)
+neg_inv = s.execute(select(Invoice).where(Invoice.invoice_no == "SC-NEG-S1")).scalars().first()
+neg_mvt = s.execute(select(InventoryMovement).where(
+    InventoryMovement.source_type == "sales_invoice", InventoryMovement.source_id == neg_inv.id)).scalars().first()
 after_inv = s.execute(select(Invoice).where(Invoice.invoice_no == "SC-NEG-AFTER")).scalars().first()
 after_mvt = s.execute(select(InventoryMovement).where(
     InventoryMovement.source_type == "purchase_invoice", InventoryMovement.source_id == after_inv.id)).scalars().first()
-check("1.4 Scope — الإغلاق عند أول وصول لـ<=0 (لا يمتد بعده)",
-      ("inventory_movement", after_mvt.id) not in elements)
+check("1.4 Scope (FD-001 REV1) — عبور سالب فعلي (-4) لا يغلق الفرع، حركة العبور نفسها تدخل النطاق",
+      ("inventory_movement", neg_mvt.id) in elements)
+check("1.4b Scope (FD-001 REV1) — بعد عبور سالب فعلي، الحركة اللاحقة تدخل النطاق أيضاً (لا إيقاف عند <0)",
+      ("inventory_movement", after_mvt.id) in elements)
 
-# --- 1.5 W1 closes while W2 remains open (independent per warehouse) -------
+# --- 1.5 (FD-001 REV1) W1's own exhaustion does not exclude W1's later data,
+# ولا يمنع بناء فرع W2 المستقل أيضاً (كلاهما بلا إيقاف مبكر الآن) --------
 s = fresh_session()
 coa, wh1 = seed(s)
 wh2 = Warehouse(name_ar="W2"); s.add(wh2); s.commit()
 item = make_item(s, coa, "SC-INDEP")
 purchase(s, item, wh1, 9, 10, DAY1, "SC-INDEP-P1-W1")
 sale(s, item, wh1, 10, 15, DAY5, "SC-INDEP-S1-W1")     # W1 يستنفد تماماً (1+9-10=0)
-purchase(s, item, wh1, 5, 12, DAY10, "SC-INDEP-AFTER-W1")  # لن تدخل النطاق
-purchase(s, item, wh2, 20, 10, DAY10, "SC-INDEP-LATER-W2")  # W2 يبقى موجباً بلا استنفاد
+purchase(s, item, wh1, 5, 12, DAY10, "SC-INDEP-AFTER-W1")  # يجب أن تدخل النطاق الآن
+purchase(s, item, wh2, 20, 10, DAY10, "SC-INDEP-LATER-W2")  # W2 مستقلة، تدخل أيضاً بلا شرط كمي
 purchase(s, item, wh1, 1, 11, datetime.date(2025, 12, 25), "SC-INDEP-ROOT")
 ev = only_candidate_event(s, item.id)
 build_impact_scope(s, ev.id)
@@ -194,8 +208,49 @@ elements = scope_element_ids(s, ev.id)
 w1_after_inv = s.execute(select(Invoice).where(Invoice.invoice_no == "SC-INDEP-AFTER-W1")).scalars().first()
 w1_after = s.execute(select(InventoryMovement).where(
     InventoryMovement.source_type == "purchase_invoice", InventoryMovement.source_id == w1_after_inv.id)).scalars().first()
-check("1.5 Scope — إغلاق W1 لا يمنع بناء نطاق مستقل (الجذر هنا بـW1 فقط أصلاً)",
-      ("inventory_movement", w1_after.id) not in elements)
+check("1.5 Scope (FD-001 REV1) — استنفاد W1 لا يستبعد حركتها اللاحقة (لا إيقاف مبكر كمي)",
+      ("inventory_movement", w1_after.id) in elements)
+w2_later_inv = s.execute(select(Invoice).where(Invoice.invoice_no == "SC-INDEP-LATER-W2")).scalars().first()
+w2_later = s.execute(select(InventoryMovement).where(
+    InventoryMovement.source_type == "purchase_invoice", InventoryMovement.source_id == w2_later_inv.id)).scalars().first()
+# تصحيح مراجعة (كان سيُختبَر خطأً كـ"W2 يجب أن تدخل النطاق" قبل هذا
+# التصحيح): قراءة الكود الفعلي (build_impact_scope) تُظهر أن walk_warehouse_branch
+# يُستدعى فقط لـ(item, warehouse) الجذر؛ عبور warehouse آخر لا يحدث إلا عبر
+# StockTransfer صريح (find_transfer_destination — FD-002 دلالي لا زمني).
+# W2 هنا مستقلة تماماً (نفس الصنف، بلا أي تحويل يربطها بـW1) -- لذلك
+# التوقع الصحيح المطابق للتصميم الفعلي هو استبعادها، لا إدراجها.
+# هذا يصحح تعليق 1.5 الأصلي ("W2 المستقلة تُبنى أيضاً") الذي كان غير
+# دقيق -- افتراض ضمني لم يتحقق منه أحد قبل إضافة assertion صريح هنا.
+# القرار محسوم فعلاً، لا سؤال مفتوح: WORKFLOW.md §46 ("التكلفة منفصلة
+# لكل مستودع، لا موحّدة على مستوى الشركة") + test_warehouse_cost_isolation.py
+# (12/12 PASS) يثبتان أن عزل المستودعات هو التصميم المعتمد أصلاً. لا
+# حاجة لأي FD جديد بخصوص هذه النقطة.
+check("1.5b Scope (FD-001 REV1) — مستودع مستقل بلا تحويل يبقى خارج النطاق فعلياً (يطابق الكود ويطابق قرار عزل التكلفة بالمستودع §46 WORKFLOW.md؛ يصحح تعليق 1.5 الأصلي)",
+      w2_later.warehouse_id == wh2.id and ("inventory_movement", w2_later.id) not in elements)
+
+# --- 1.6 (FD-001 REV1 — required test, Bilal's explicit addition) ----------
+# يُثبِت صراحة أن total_qty<=0 لم تُستبدَل ضمنياً بأي شرط مكافئ: كمية
+# الجذر ≠ صفر (Case B)، عبور دقيق للصفر فعلاً، حركة لاحقة حقيقية موجودة،
+# وهي عضو مؤكَّد بالـImpactScopeElement -- تكراراً لمثال Finding A
+# الأصلي نفسه المُستخدَم بكامل تحقيق FD-001.
+s = fresh_session()
+coa, wh = seed(s)
+item = make_item(s, coa, "SC-FD001-REV1")
+purchase(s, item, wh, 10, 10, DAY1, "SC-FD001-A")        # Purchase A
+sale(s, item, wh, 15, 10, DAY5, "SC-FD001-B")             # Sale B -- تستنفد تماماً بعد الجذر (5+10-15=0)
+purchase(s, item, wh, 8, 30, DAY10, "SC-FD001-C")         # Purchase C -- مكافئة لمثال Finding A بالتحقيق
+root_inv = purchase(s, item, wh, 5, 20, datetime.date(2025, 12, 20), "SC-FD001-ROOT")  # الجذر (كمية=5≠صفر)
+ev = only_candidate_event(s, item.id)
+root_mvt = s.execute(select(InventoryMovement).where(
+    InventoryMovement.source_type == "purchase_invoice", InventoryMovement.source_id == root_inv.id)).scalars().first()
+build_impact_scope(s, ev.id)
+elements = scope_element_ids(s, ev.id)
+c_inv = s.execute(select(Invoice).where(Invoice.invoice_no == "SC-FD001-C")).scalars().first()
+c_mvt = s.execute(select(InventoryMovement).where(
+    InventoryMovement.source_type == "purchase_invoice", InventoryMovement.source_id == c_inv.id)).scalars().first()
+check("1.6 FD-001 REV1 — جذر كمية≠صفر + عبور دقيق للصفر + Purchase C اللاحقة عضو مؤكَّد بالنطاق",
+      root_mvt.quantity != 0 and ("inventory_movement", c_mvt.id) in elements,
+      f"root_qty={root_mvt.quantity}, C in scope={('inventory_movement', c_mvt.id) in elements}")
 
 # ===========================================================================
 # 2) TRANSFER TRAVERSAL
@@ -291,7 +346,7 @@ build_impact_scope(s, ev.id)
 s.refresh(ev)
 check("4.2 Chronology — حركتان متعادلتا التاريخ ضمن الفرع => ASSUMED",
       ev.chronology_basis == ChronologyBasis.ASSUMED, f"القيمة={ev.chronology_basis}")
-check("4.3 Completeness — ASSUMED لا يمنع COMPLETE (استنفاد تام فعلياً هنا)",
+check("4.3 Completeness (FD-001 REV1) — ASSUMED لا يمنع COMPLETE (COMPLETE افتراضية الآن، لا تعتمد على استنفاد كمي)",
       ev.scope_completeness == ScopeCompleteness.COMPLETE, f"القيمة={ev.scope_completeness}")
 
 # ===========================================================================
@@ -343,16 +398,17 @@ check("6.1 ID-003 — 1×N: حافتان (fan-out) من الجذر المفرد 
 check("6.2 ID-003 — N×1: حافتان (fan-in) من عنصري يوم5 للعنصر الوحيد بيوم10",
       edge_count_between(s, ev.id, mid_ids, next_ids) == 2)
 
-# --- 6.3 — N -> M: صفر حافات، مع وصول Scope فعلياً لعناصر كلا المجموعتين
-# وإغلاق الفرع فعلياً (COMPLETE) لأسباب لا علاقة لها بغياب الحافة --
-# يعزل المتغيّر المُختبَر (وجود/غياب PROPAGATES_TO) عن حالة الإغلاق تماماً.
+# --- 6.3 — N -> M: صفر حافات، مع وصول Scope فعلياً لعناصر كلا المجموعتين.
+# (FD-001 REV1: COMPLETE أصبحت افتراضية لأي traversal يستنفد بياناته
+# الحقيقية -- لا علاقة لها بأي حالة كمية بعد الآن. السيناريو أدناه يبقى
+# صالحاً كحالة N×M عامة، بصرف النظر عن كون المجموعتين تُصفِّران الكمية.)
 s = fresh_session()
 coa, wh = seed(s)
 item = make_item(s, coa, "SC-NM")
 purchase(s, item, wh, 3, 10, DAY5, "SC-NM-A1")
-purchase(s, item, wh, 4, 10, DAY5, "SC-NM-A2")    # مجموعة N=2 بيوم5 (بعد الجذر: 5+3+4=12)
+purchase(s, item, wh, 4, 10, DAY5, "SC-NM-A2")    # مجموعة N=2 بيوم5
 sale(s, item, wh, 6, 15, DAY10, "SC-NM-B1")
-sale(s, item, wh, 6, 15, DAY10, "SC-NM-B2")       # مجموعة M=2 بيوم10 (12-6-6=0 -- إغلاق فعلي)
+sale(s, item, wh, 6, 15, DAY10, "SC-NM-B2")       # مجموعة M=2 بيوم10
 purchase(s, item, wh, 5, 12, datetime.date(2025, 12, 20), "SC-NM-ROOT")
 ev = only_candidate_event(s, item.id)
 build_impact_scope(s, ev.id)
@@ -364,8 +420,8 @@ check("6.3a ID-003 — N×M: صفر حافات بين المجموعتين",
 check("6.3b ID-003 — N×M: كل العناصر الأربعة تبقى أعضاء Scope رغم غياب الحافة",
       all(("inventory_movement", mid) in elements for mid in a_ids + b_ids))
 ev_refreshed = s.get(CorrectionEvent, ev.id)
-check("6.3c ID-003 — N×M: الفرع يُغلَق فعلياً (COMPLETE) بسبب total_qty<=0 الحقيقي —"
-      " لا علاقة لغياب الحافة بحالة الإغلاق إطلاقاً",
+check("6.3c ID-003 (FD-001 REV1) — N×M: COMPLETE افتراضية (استنفاد بيانات لا حالة كمية) —"
+      " غياب الحافة لا علاقة له بها إطلاقاً",
       ev_refreshed.scope_completeness == ScopeCompleteness.COMPLETE,
       f"القيمة={ev_refreshed.scope_completeness}")
 
