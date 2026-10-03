@@ -1,0 +1,120 @@
+"""
+tests/run_gate.py
+====================
+نقطة التشغيل الفعلية للبوابة (§31، §33 بـWORKFLOW.md) — يجمع:
+  1) fuzz+oracle (200 سيناريو شراء عشوائي)
+  2) Regression الكامل الحقيقي (تشغيل الملفات كسكربتات فعلية، لا محاكاة)
+     — يشمل الآن اختبارات Alembic (تكامل معزول + مسار التطبيق الحقيقي +
+     migration safety المُعاد كتابته بالكامل — راجع §33.5، لم يعد Known
+     Failure دائماً بعد استبداله).
+
+الاستخدام: `python3 tests/run_gate.py`
+النتيجة: reports_out/fuzz_report.md + .json، وexit code = 0 فقط إذا
+         gate() == True.
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tests.fuzz_report import FuzzReport
+from tests.test_accounting_fuzz_oracle import (
+    NUM_SCENARIOS, run_scenario,
+)
+
+REGRESSION_FILES = [
+    "tests/test_accounting_edge_cases.py",
+    "tests/test_e2e_scenario.py",
+    "tests/test_per_item_account_posting.py",
+    "tests/test_alembic_integration.py",
+    "tests/test_app_path_after_alembic.py",
+    "tests/test_migration_safety.py",
+    "tests/test_migration_double_run_safety.py",
+    "tests/test_aggressive_currency_inventory.py",
+    "tests/test_inventory_unit_cost_source_of_truth.py",
+    "tests/test_full_inventory_lifecycle.py",
+    "tests/test_settlement_fx.py",
+    "tests/test_cancel_invoice.py",
+    "tests/test_warehouse_aggregate_view.py",
+    "tests/test_warehouse_cost_isolation.py",
+    "tests/test_qt_editor_lifecycle.py",
+    "tests/test_ui_warehouse_integration.py",
+    "tests/test_comprehensive_review.py",
+    "tests/test_settlement_tamper_resistance.py",
+    "tests/test_ui_settlement_and_cancel.py",
+    "tests/test_ui_full_sales_lifecycle.py",
+    "tests/test_currency_lifecycle_final.py",
+    "tests/test_allow_reconciliation_enforcement.py",
+    "tests/test_account_reconciliation_rules.py",
+    "tests/test_invoice_cycle_customer_supplier.py",
+    "tests/test_phase2_migration_data_integrity.py",
+    "tests/test_base_currency_source_of_truth.py",
+    "tests/test_opening_account_balances.py",
+    "tests/test_opening_inventory.py",
+    "tests/test_phase3b3_settlement_allocation.py",
+    "tests/test_phase3b3_migration.py",
+    "tests/test_accounting_boundary_phase3b4.py",
+    "tests/test_jv_rev_namespace_reconciliation.py",
+    "tests/test_jv_rev_reservation_independent_of_document_rollback.py",
+    "tests/test_ui_journal_voucher_boundary.py",
+    "tests/test_jv_manual_namespace_seed.py",
+    "tests/test_sales_invoice_boundary_migration.py",
+    "tests/test_purchase_invoice_boundary_migration.py",
+    "tests/test_real_db_path_no_lock_on_first_post.py",
+    "tests/test_invoice_cancel_boundary_migration.py",
+    "tests/test_jv_open_opnpty_namespace_seed.py",
+    "tests/test_reverse_manual_entry_wrapper.py",
+    "tests/test_correction_detection_3b5e.py",
+    "tests/test_correction_scope_3b5f.py",
+    "tests/test_candidate_engine_g007.py",
+    "tests/test_correction_entry_builder.py",
+    "tests/test_movement_date_type_defect_characterization.py",
+]
+
+# لا Known Failures متبقية حالياً — كانت test_migration_safety.py مسجّلة
+# هنا سابقاً، استُبدلت بالكامل بمنطق النظام الجديد (WORKFLOW.md §33.5)
+# ونجحت فعلياً، فلم تعد استثناءً. القائمة تبقى موجودة (فارغة) لتُستخدم
+# فوراً لو ظهر أي فشل معروف مستقبلاً — لا تُحذف الآلية نفسها.
+KNOWN_FAILURES: list[str] = []
+
+
+def run_regression() -> bool:
+    all_passed = True
+    for f in REGRESSION_FILES:
+        result = subprocess.run(
+            [sys.executable, f], cwd=ROOT, capture_output=True, text=True,
+        )
+        ok = result.returncode == 0
+        all_passed = all_passed and ok
+        status = "✅" if ok else "❌"
+        print(f"{status} {f} (exit={result.returncode})")
+        if not ok:
+            print(result.stdout[-2000:])
+            print(result.stderr[-2000:])
+    return all_passed
+
+
+def main() -> int:
+    print("== 1) Regression الكامل ==")
+    regression_passed = run_regression()
+
+    print("\n== 2) Fuzz + Oracle مستقل ==")
+    report = FuzzReport()
+    for seed in range(NUM_SCENARIOS):
+        report.scenarios.append(run_scenario(seed))
+    report.regression_suite_passed = regression_passed
+    report.known_failures = KNOWN_FAILURES
+
+    out_dir = ROOT / "reports_out"
+    out_dir.mkdir(exist_ok=True)
+    report.save(out_dir / "fuzz_report")
+
+    print("\n" + report.to_markdown())
+
+    return 0 if report.gate() else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
